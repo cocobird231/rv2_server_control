@@ -1,0 +1,5 @@
+control_server:
+  ros__parameters:
+    server_name: control_server
+    output_interval_ms: 50
+    status_timer_interval_ms: 1000   # CSM status/disconnect timer period (ms)
