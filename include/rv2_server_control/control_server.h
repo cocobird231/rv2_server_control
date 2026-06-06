@@ -31,7 +31,9 @@
 
 #pragma once
 
-#include "control_signal_manager.h"
+#include "control_signal_detect.h"
+
+#include <rv2_control_signal_transport/control_signal_manager.h>
 
 #include <map>
 #include <mutex>
@@ -42,7 +44,7 @@
 #include <chrono>
 #include <vector>
 
-namespace rv2_interfaces
+namespace rv2_interfaces::rv2_server_control
 {
 
 
@@ -112,6 +114,12 @@ public:
          * if no Sink was active.
          */
         std::function<void(const msg::ControlSignalInfo&)> emergencyStopCb;
+
+        TypeConfig()
+        {
+            isEmergencyStop = rv2_interfaces::rv2_server_control::isEmergencyStop<msgT>;
+            isRequestActive = rv2_interfaces::rv2_server_control::isRequestActive<msgT>;
+        }
     };
 
     // ── Constructor ───────────────────────────────────────────────────────────
@@ -402,9 +410,6 @@ private:
     template<typename msgT>
     void _installTimerHandler(TypeConfig<msgT> tcfg, std::type_index tid)
     {
-        using SrvT  = typename detail::ServiceTypeOf<msgT>::type;
-        using SinkT = ControlSignalSink<msgT, SrvT>;
-
         std::lock_guard<std::mutex> lk(timerHandlerMtx_);
         timerHandlers_.push_back([this, tcfg, tid]()
         {
@@ -455,17 +460,11 @@ private:
                 if (activeIt == snapshot.sinkRecords.end()) return;
             }
 
-            // Down-cast to typed Sink and read.
-            // Topic-mode sinks are ControlSignalSink<msgT, void>; service-mode sinks use SrvT.
-            // Try void first (covers topic mode and types with no service variant).
+            // Read from the active Sink without knowing its concrete
+            // ControlSignalSink<msgT, srvT> specialisation: readErased() copies
+            // the latest msgT into outMsg via the type-erased base interface.
             msgT outMsg;
-            bool readOk = false;
-            if (auto* s = dynamic_cast<ControlSignalSink<msgT, void>*>(
-                    activeIt->second.sink.get()))
-                readOk = s->read(outMsg);
-            else if (auto* s = dynamic_cast<SinkT*>(activeIt->second.sink.get()))
-                readOk = s->read(outMsg);
-            if (!readOk) return;
+            if (!activeIt->second.sink->readErased(&outMsg)) return;
 
             // Skip special messages.
             const bool isEStop    = tcfg.isEmergencyStop && tcfg.isEmergencyStop(outMsg);
@@ -478,4 +477,4 @@ private:
 };
 
 
-} // namespace rv2_interfaces
+} // namespace rv2_interfaces::rv2_server_control

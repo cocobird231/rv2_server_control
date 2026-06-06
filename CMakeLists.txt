@@ -13,36 +13,18 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rv2_interfaces REQUIRED)
+find_package(rv2_control_signal_transport REQUIRED)
 
-# unitree_api — installed in the unitree_ros2 cyclonedds_ws
-set(UNITREE_CYCLONE_WS
-    "/home/coco/Workspace/ros2_tools/src/unitree_ros2/cyclonedds_ws/install")
-list(APPEND CMAKE_PREFIX_PATH "${UNITREE_CYCLONE_WS}/unitree_api")
 find_package(unitree_api REQUIRED)
 
-# nlohmann/json — header-only, bundled with the unitree_ros2 example
-set(UNITREE_EXAMPLE_INCLUDE
-    "/home/coco/Workspace/ros2_tools/src/unitree_ros2/example/src/include")
-
-# ── test_csm (plain executable) ───────────────────────────────────────────────
-add_executable(test_csm test/test_csm.cpp)
-target_include_directories(test_csm PRIVATE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-)
-ament_target_dependencies(test_csm
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  std_msgs
-  rv2_interfaces
-)
-install(TARGETS test_csm DESTINATION lib/${PROJECT_NAME})
-
 # ── control_server (composable node) ─────────────────────────────────────────
-add_library(control_server_component SHARED src/control_server.cpp)
+add_library(control_server_component SHARED
+  src/control_server.cpp
+  thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp
+)
 target_include_directories(control_server_component PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  ${UNITREE_EXAMPLE_INCLUDE}
+  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unitree_ros2_client
 )
 ament_target_dependencies(control_server_component
   rclcpp
@@ -52,6 +34,7 @@ ament_target_dependencies(control_server_component
   std_msgs
   rv2_interfaces
   unitree_api
+  rv2_control_signal_transport
 )
 rclcpp_components_register_node(control_server_component
   PLUGIN "ControlServerNode"
@@ -65,9 +48,6 @@ install(TARGETS control_server_component control_server
 
 # ── fake_unitree_api (composable node, lives in test/) ───────────────────────
 add_library(fake_unitree_api_component SHARED test/fake_unitree_api_node.cpp)
-target_include_directories(fake_unitree_api_component PRIVATE
-  ${UNITREE_EXAMPLE_INCLUDE}
-)
 ament_target_dependencies(fake_unitree_api_component
   rclcpp
   rclcpp_components
@@ -94,6 +74,7 @@ ament_target_dependencies(test_control_server
   geometry_msgs
   std_msgs
   rv2_interfaces
+  rv2_control_signal_transport
 )
 install(TARGETS test_control_server DESTINATION lib/${PROJECT_NAME})
 
@@ -103,7 +84,9 @@ ament_export_include_directories(include)
 ament_export_dependencies(
   rclcpp rclcpp_components
   sensor_msgs geometry_msgs std_msgs
-  rv2_interfaces)
+  rv2_interfaces
+  unitree_api
+  rv2_control_signal_transport)
 
 # ── launch files ──────────────────────────────────────────────────────────────
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})

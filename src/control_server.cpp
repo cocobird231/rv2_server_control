@@ -21,172 +21,13 @@
  */
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include "unitree_api/msg/request.hpp"
-#include "nlohmann/json.hpp"
+#include "ros2_b2_sport_client.h"
 #include "rv2_server_control/control_server.h"
+#include "rv2_server_control/control_signal_detect.h"
 #include "rclcpp_components/register_node_macro.hpp"
 
-// ── Unitree Sport API IDs ─────────────────────────────────────────────────────
-//  Defined here to avoid depending on the full SportClient library.
-//  Values match ROBOT_SPORT_API_ID_* constants in ros2_b2_sport_client.h.
-static constexpr int64_t SPORT_API_ID_DAMP          = 1001;
-static constexpr int64_t SPORT_API_ID_STOPMOVE       = 1003;
-static constexpr int64_t SPORT_API_ID_STANDUP        = 1004;
-static constexpr int64_t SPORT_API_ID_STANDDOWN      = 1005;
-static constexpr int64_t SPORT_API_ID_RECOVERY_STAND = 1006;
-static constexpr int64_t SPORT_API_ID_MOVE           = 1008;
-static constexpr int64_t SPORT_API_ID_SWITCH_GAIT    = 1011;
-
-// ── Application-specific signal conventions for Joy ───────────────────────────
-//
-//  Emergency stop : buttons[0..3] all == -99
-//  Request active : buttons[0..3] all == 99
-//
-static bool joyIsEmergencyStop(const sensor_msgs::msg::Joy& joy)
-{
-    if (static_cast<int>(joy.buttons.size()) < 4) return false;
-    return joy.buttons[0] == -99 && joy.buttons[1] == -99 &&
-           joy.buttons[2] == -99 && joy.buttons[3] == -99;
-}
-
-static bool joyIsRequestActive(const sensor_msgs::msg::Joy& joy)
-{
-    if (static_cast<int>(joy.buttons.size()) < 4) return false;
-    return joy.buttons[0] == 99 && joy.buttons[1] == 99 &&
-           joy.buttons[2] == 99 && joy.buttons[3] == 99;
-}
-
-// ── Joy → unitree_api::msg::Request ─────────────────────────────────────────
-//
-//  Button mode mapping (mirrors option_list in b2w_sport_client.cpp).
-//  First pressed button wins; the matching command is returned immediately.
-//  Buttons are standard gamepad values (0 = released, 1 = pressed).
-//  Emergency-stop sentinels (-99) and request-active sentinels (99) are
-//  handled by joyIsEmergencyStop / joyIsRequestActive before this is called.
-//
-//    buttons[0] = 1  →  Damp          (api_id 1001)
-//    buttons[1] = 1  →  StandUp       (api_id 1004)
-//    buttons[2] = 1  →  StandDown     (api_id 1005)
-//    buttons[6] = 1  →  StopMove      (api_id 1003)
-//    buttons[7] = 1  →  SwitchGait 0  (api_id 1011, {"data":0})
-//    buttons[8] = 1  →  SwitchGait 1  (api_id 1011, {"data":1})
-//    buttons[9] = 1  →  RecoveryStand (api_id 1006)
-//
-//  Axes mapping (first four axes, each unipolar 0–1):
-//    axes[0] → forward   (+vx)
-//    axes[1] → backward  (-vx)
-//    axes[2] → turn left (+vyaw)
-//    axes[3] → turn right(-vyaw)
-//  Combined: vx = axes[0] - axes[1],  vy = 0,  vyaw = axes[2] - axes[3]
-//  Builds a MOVE request (api_id 1008) with JSON {"x":vx, "y":0, "z":vyaw}.
-//
-static unitree_api::msg::Request joyToUnitreeRequest(const sensor_msgs::msg::Joy& joy)
-{
-    const auto& btn = joy.buttons;
-    const size_t nb  = btn.size();
-
-    unitree_api::msg::Request req;
-
-    // ── Button mode commands ─────────────────────────────────────────────────
-    if (nb > 0 && btn[0] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_DAMP;
-        return req;
-    }
-    if (nb > 1 && btn[1] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_STANDUP;
-        return req;
-    }
-    if (nb > 2 && btn[2] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_STANDDOWN;
-        return req;
-    }
-    if (nb > 6 && btn[6] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_STOPMOVE;
-        return req;
-    }
-    if (nb > 7 && btn[7] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_SWITCH_GAIT;
-        req.parameter = nlohmann::json{{"data", 0}}.dump();
-        return req;
-    }
-    if (nb > 8 && btn[8] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_SWITCH_GAIT;
-        req.parameter = nlohmann::json{{"data", 1}}.dump();
-        return req;
-    }
-    if (nb > 9 && btn[9] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_RECOVERY_STAND;
-        return req;
-    }
-
-    // ── Default: MOVE from axes[0..3] ───────────────────────────────────────
-    const auto& ax  = joy.axes;
-    const float vx   = (ax.size() > 1) ? (ax[0] - ax[1]) : (ax.size() > 0 ? ax[0] : 0.0f);
-    const float vyaw = (ax.size() > 3) ? (ax[2] - ax[3]) : 0.0f;
-
-    nlohmann::json js;
-    js["x"] = vx;
-    js["y"] = 0.0f;
-    js["z"] = vyaw;
-
-    req.header.identity.api_id = SPORT_API_ID_MOVE;
-    req.parameter              = js.dump();
-    return req;
-}
-
-// ── Twist signal conventions ─────────────────────────────────────────────────
-//
-//  Emergency stop : linear.z == -99  AND  angular.x == -99  AND  angular.y == -99
-//  Request active : linear.z ==  99  AND  angular.x ==  99  AND  angular.y ==  99
-//
-static bool twistIsEmergencyStop(const geometry_msgs::msg::Twist& twist)
-{
-    return twist.linear.z  == -99.0 &&
-           twist.angular.x == -99.0 &&
-           twist.angular.y == -99.0;
-}
-
-static bool twistIsRequestActive(const geometry_msgs::msg::Twist& twist)
-{
-    return twist.linear.z  == 99.0 &&
-           twist.angular.x == 99.0 &&
-           twist.angular.y == 99.0;
-}
-
-// ── Twist → unitree_api::msg::Request (Move command) ─────────────────────────
-//
-//  Field mapping:
-//    linear.x  → vx   (forward / backward)
-//    linear.y  → vy   (lateral strafe)
-//    angular.z → vyaw (rotation)
-//
-//  Builds a MOVE request (api_id = 1008) with JSON payload
-//  {"x": vx, "y": vy, "z": vyaw}.
-//
-static unitree_api::msg::Request twistToUnitreeRequest(const geometry_msgs::msg::Twist& twist)
-{
-    nlohmann::json js;
-    js["x"] = static_cast<float>(twist.linear.x);
-    js["y"] = static_cast<float>(twist.linear.y);
-    js["z"] = static_cast<float>(twist.angular.z);
-
-    unitree_api::msg::Request req;
-    req.header.identity.api_id = SPORT_API_ID_MOVE;
-    req.parameter              = js.dump();
-    return req;
-}
-
-// ── Emergency stop → unitree_api::msg::Request (StopMove command) ────────────
-//
-//  Builds a STOPMOVE request (api_id = 1003) with no parameters.
-//
-static unitree_api::msg::Request makeStopRequest()
-{
-    unitree_api::msg::Request req;
-    req.header.identity.api_id = SPORT_API_ID_STOPMOVE;
-    return req;
-}
 
 
 // ── ControlServerNode ─────────────────────────────────────────────────────────
@@ -196,6 +37,7 @@ class ControlServerNode : public rclcpp::Node
 public:
     explicit ControlServerNode(const rclcpp::NodeOptions & options)
         : Node("control_server", options)
+        , sportClient_(this)
     {
         // Declare parameters
         this->declare_parameter<std::string>("server_name",              "control_server");
@@ -206,46 +48,54 @@ public:
         const int64_t     outputIntervalMs    = this->get_parameter("output_interval_ms").as_int();
         const int64_t     statusTimerMs       = this->get_parameter("status_timer_interval_ms").as_int();
 
-        // Publisher: Unitree sport API request on the standard topic
-        reqPub_ = this->create_publisher<unitree_api::msg::Request>(
-            "/api/sport/request", rclcpp::QoS(10));
-
         // Build ControlServer config
-        rv2_interfaces::ControlServer::Config cfg;
+        rv2_interfaces::rv2_server_control::ControlServer::Config cfg;
         cfg.name                  = serverName;
         cfg.outputIntervalNs      = outputIntervalMs * 1'000'000LL;
         cfg.statusTimerIntervalMs = statusTimerMs;
 
-        server_ = std::make_unique<rv2_interfaces::ControlServer>(this, std::move(cfg));
+        server_ = std::make_unique<rv2_interfaces::rv2_server_control::ControlServer>(this, std::move(cfg));
 
         // Register Joy type config
-        rv2_interfaces::ControlServer::TypeConfig<sensor_msgs::msg::Joy> joyCfg;
-        joyCfg.isEmergencyStop = joyIsEmergencyStop;
-        joyCfg.isRequestActive = joyIsRequestActive;
-
+        rv2_interfaces::rv2_server_control::ControlServer::TypeConfig<sensor_msgs::msg::Joy> joyCfg;
         joyCfg.outputCb = [this](const sensor_msgs::msg::Joy& joy,
                                  const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            auto req = joyToUnitreeRequest(joy);
-            reqPub_->publish(req);
+            unitree_api::msg::Request req;
+            const auto & btn = joy.buttons;
+            const size_t nb  = btn.size();
 
-            const int64_t api = req.header.identity.api_id;
-            if (api == SPORT_API_ID_MOVE) {
+            if      (nb > 0 && btn[0] == 1) { sportClient_.Damp(req); }
+            else if (nb > 1 && btn[1] == 1) { sportClient_.StandUp(req); }
+            else if (nb > 2 && btn[2] == 1) { sportClient_.StandDown(req); }
+            else if (nb > 6 && btn[6] == 1) { sportClient_.StopMove(req); }
+            else if (nb > 9 && btn[9] == 1) { sportClient_.RecoveryStand(req); }
+            else if (nb > 7 && btn[7] == 1) { sportClient_.SwitchGait(req, 0); }
+            else if (nb > 8 && btn[8] == 1) { sportClient_.SwitchGait(req, 1); }
+            else {
+                const auto & ax   = joy.axes;
+                const float  vx   = (ax.size() > 1) ? (ax[0] - ax[1]) : (ax.size() > 0 ? ax[0] : 0.0f);
+                const float  vyaw = (ax.size() > 3) ? (ax[2] - ax[3]) : 0.0f;
+                sportClient_.Move(req, vx, 0.0f, vyaw);
+            }
+
+            const int32_t api = req.header.identity.api_id;
+            if (api == ROBOT_SPORT_API_ID_MOVE) {
                 RCLCPP_DEBUG(this->get_logger(),
                     "[cmd/joy] MOVE ch='%s' param=%s",
                     info.channel_name.c_str(), req.parameter.c_str());
             } else {
                 const char * cmd = "UNKNOWN";
                 switch (api) {
-                case SPORT_API_ID_DAMP:           cmd = "DAMP";           break;
-                case SPORT_API_ID_STANDUP:        cmd = "STAND_UP";       break;
-                case SPORT_API_ID_STANDDOWN:      cmd = "STAND_DOWN";     break;
-                case SPORT_API_ID_STOPMOVE:       cmd = "STOP_MOVE";      break;
-                case SPORT_API_ID_SWITCH_GAIT:    cmd = "SWITCH_GAIT";    break;
-                case SPORT_API_ID_RECOVERY_STAND: cmd = "RECOVERY_STAND"; break;
+                case ROBOT_SPORT_API_ID_DAMP:          cmd = "DAMP";           break;
+                case ROBOT_SPORT_API_ID_STANDUP:       cmd = "STAND_UP";       break;
+                case ROBOT_SPORT_API_ID_STANDDOWN:     cmd = "STAND_DOWN";     break;
+                case ROBOT_SPORT_API_ID_STOPMOVE:      cmd = "STOP_MOVE";      break;
+                case ROBOT_SPORT_API_ID_SWITCHGAIT:    cmd = "SWITCH_GAIT";    break;
+                case ROBOT_SPORT_API_ID_RECOVERYSTAND: cmd = "RECOVERY_STAND"; break;
                 default: break;
                 }
-                if (api == SPORT_API_ID_DAMP) {
+                if (api == ROBOT_SPORT_API_ID_DAMP) {
                     RCLCPP_WARN(this->get_logger(),
                         "[cmd/joy] %s  ch='%s'%s",
                         cmd, info.channel_name.c_str(),
@@ -261,7 +111,8 @@ public:
 
         joyCfg.emergencyStopCb = [this](const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            reqPub_->publish(makeStopRequest());
+            unitree_api::msg::Request req;
+            sportClient_.StopMove(req);
             RCLCPP_WARN(this->get_logger(),
                 "[E-STOP/joy] STOP_MOVE sent. Triggered by ch='%s'",
                 info.channel_name.empty() ? "(no active sink)" : info.channel_name.c_str());
@@ -270,16 +121,15 @@ public:
         server_->registerTypeConfig(std::move(joyCfg));
 
         // Register Twist type config
-        rv2_interfaces::ControlServer::TypeConfig<geometry_msgs::msg::Twist> twistCfg;
-        twistCfg.isEmergencyStop = twistIsEmergencyStop;
-        twistCfg.isRequestActive = twistIsRequestActive;
-
+        rv2_interfaces::rv2_server_control::ControlServer::TypeConfig<geometry_msgs::msg::Twist> twistCfg;
         twistCfg.outputCb = [this](const geometry_msgs::msg::Twist& twist,
                                    const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            auto req = twistToUnitreeRequest(twist);
-            reqPub_->publish(req);
-
+            unitree_api::msg::Request req;
+            sportClient_.Move(req,
+                static_cast<float>(twist.linear.x),
+                static_cast<float>(twist.linear.y),
+                static_cast<float>(twist.angular.z));
             RCLCPP_DEBUG(this->get_logger(),
                 "[cmd/twist] MOVE ch='%s' param=%s",
                 info.channel_name.c_str(), req.parameter.c_str());
@@ -287,7 +137,8 @@ public:
 
         twistCfg.emergencyStopCb = [this](const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            reqPub_->publish(makeStopRequest());
+            unitree_api::msg::Request req;
+            sportClient_.StopMove(req);
             RCLCPP_WARN(this->get_logger(),
                 "[E-STOP/twist] STOP_MOVE sent. Triggered by ch='%s'",
                 info.channel_name.empty() ? "(no active sink)" : info.channel_name.c_str());
@@ -302,8 +153,8 @@ public:
     }
 
 private:
-    rclcpp::Publisher<unitree_api::msg::Request>::SharedPtr reqPub_;
-    std::unique_ptr<rv2_interfaces::ControlServer> server_;
+    SportClient sportClient_;
+    std::unique_ptr<rv2_interfaces::rv2_server_control::ControlServer> server_;
 };
 
 RCLCPP_COMPONENTS_REGISTER_NODE(ControlServerNode)

@@ -1,0 +1,6 @@
+repo_url: https://github.com/unitreerobotics/unitree_ros2.git
+commit: 5204e6e098ee53f4bd929bd77eb1d387cd0fa842
+file_paths:
+    - ros2_b2_sport_client.h: example/src/include/common/ros2_b2_sport_client.h
+    - ros2_b2_sport_client.cpp: example/src/src/common/ros2_b2_sport_client.cpp
+    - patch.hpp: example/src/include/common/patch.hpp

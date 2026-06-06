@@ -29,9 +29,14 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rv2_server_control/control_server.h"
-#include "rv2_server_control/control_signal_manager.h"
+#include "rv2_control_signal_transport/control_signal_manager.h"
+
+#include <sensor_msgs/msg/joy.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <rv2_interfaces/srv/control_signal_joy.hpp>
 
 using namespace rv2_interfaces;
+using namespace rv2_interfaces::rv2_server_control;
 using namespace std::chrono_literals;
 using Joy   = sensor_msgs::msg::Joy;
 using Twist = geometry_msgs::msg::Twist;
