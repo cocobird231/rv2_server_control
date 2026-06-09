@@ -14,6 +14,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rv2_interfaces REQUIRED)
 find_package(rv2_control_signal_transport REQUIRED)
+find_package(joy_interpreter REQUIRED)
 
 find_package(unitree_api REQUIRED)
 
@@ -22,9 +23,11 @@ add_library(control_server_component SHARED
   src/control_server.cpp
   thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp
 )
-target_include_directories(control_server_component PRIVATE
+target_include_directories(control_server_component PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unitree_ros2_client
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unitree_ros2_client>
+  $<INSTALL_INTERFACE:include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}/thirdparty>
 )
 ament_target_dependencies(control_server_component
   rclcpp
@@ -35,6 +38,7 @@ ament_target_dependencies(control_server_component
   rv2_interfaces
   unitree_api
   rv2_control_signal_transport
+  joy_interpreter
 )
 rclcpp_components_register_node(control_server_component
   PLUGIN "ControlServerNode"
@@ -80,13 +84,19 @@ install(TARGETS test_control_server DESTINATION lib/${PROJECT_NAME})
 
 # ── public headers ────────────────────────────────────────────────────────────
 install(DIRECTORY include/ DESTINATION include)
-ament_export_include_directories(include)
+install(FILES
+  thirdparty/unitree_ros2_client/ros2_b2_sport_client.h
+  thirdparty/unitree_ros2_client/patch.hpp
+  DESTINATION include/${PROJECT_NAME}/thirdparty
+)
+ament_export_include_directories(include include/${PROJECT_NAME}/thirdparty)
 ament_export_dependencies(
   rclcpp rclcpp_components
   sensor_msgs geometry_msgs std_msgs
   rv2_interfaces
   unitree_api
-  rv2_control_signal_transport)
+  rv2_control_signal_transport
+  joy_interpreter)
 
 # ── launch files ──────────────────────────────────────────────────────────────
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})

@@ -1,136 +1,141 @@
 /**
  * output_message_convert.h
  *
- * Generic interface for converting ROS 2 control-signal messages to an output
- * signal type, and for generating stop signals.
+ * Converts ROS 2 control-signal messages to SportClientCmd — a callable
+ * that drives a SportClient directly, with no intermediate Request object
+ * exposed to callers.
  *
- * ── Generic interface ─────────────────────────────────────────────────────────
- *  msgToOutSignal<outT>(inT msg)  — convert an input message to outT
- *  makeStopSignal<outT>()         — produce a type-appropriate stop signal
+ * ── Interface ─────────────────────────────────────────────────────────────────
  *
- * ── Specialisations: unitree_api::msg::Request ────────────────────────────────
- *  msgToOutSignal<Request>(const Joy &)    — Joy  → sport command
- *  msgToOutSignal<Request>(const Twist &)  — Twist → sport MOVE
- *  makeStopSignal<Request>()               — StopMove (api_id 1003)
+ *  SportClientCmd  — alias for std::function<void(SportClient&)>
  *
- *  Joy button-mode commands (first match wins):
- *    buttons[0] = 1  →  Damp          (api_id 1001)
- *    buttons[1] = 1  →  StandUp       (api_id 1004)
- *    buttons[2] = 1  →  StandDown     (api_id 1005)
- *    buttons[6] = 1  →  StopMove      (api_id 1003)
- *    buttons[7] = 1  →  SwitchGait 0  (api_id 1011, {"data":0})
- *    buttons[8] = 1  →  SwitchGait 1  (api_id 1011, {"data":1})
- *    buttons[9] = 1  →  RecoveryStand (api_id 1006)
- *  Default: MOVE (api_id 1008).
- *    vx = axes[0] - axes[1],  vy = 0,  vyaw = axes[2] - axes[3]
+ *  msgToOutSignal(id, msg)  — convert an input message to a SportClientCmd.
+ *    id  : string channel identifier; used to maintain per-channel state
+ *          (e.g. a JoyInterpreter instance per source).
+ *    msg : incoming ROS 2 message.
  *
- *  Twist MOVE (api_id 1008):
- *    linear.x → vx,  linear.y → vy,  angular.z → vyaw
+ *  makeStopSignal()  — returns a SportClientCmd that issues StopMove.
  *
- * ── Usage ────────────────────────────────────────────────────────────────────
+ * ── Specialisations ───────────────────────────────────────────────────────────
+ *
+ *  Joy (sensor_msgs::msg::Joy)
+ *    Each unique id owns a JoyInterpreter (static map, one instance per channel).
+ *    Button events → sport commands (first PRESS event wins per timer tick):
+ *      button[0] PRESS  →  Damp
+ *      button[1] PRESS  →  StandUp
+ *      button[2] PRESS  →  StandDown
+ *      button[6] PRESS  →  StopMove
+ *      button[7] PRESS  →  SwitchGait(0)
+ *      button[8] PRESS  →  SwitchGait(1)
+ *      button[9] PRESS  →  RecoveryStand
+ *    Default (no button event): Move(vx, 0, vyaw)
+ *      vx   = axes[0] - axes[1]
+ *      vyaw = axes[2] - axes[3]
+ *
+ *  Twist (geometry_msgs::msg::Twist)
+ *    Always returns Move(linear.x, linear.y, angular.z).
+ *    id is unused (Twist has no per-channel interpreter state).
+ *
+ * ── Usage ─────────────────────────────────────────────────────────────────────
  *  #include "rv2_server_control/output_message_convert.h"
  *
- *  auto req  = rv2_server_control::msgToOutSignal<unitree_api::msg::Request>(joy_msg);
- *  auto stop = rv2_server_control::makeStopSignal<unitree_api::msg::Request>();
+ *  // In outputCb — drives sportClient_ directly:
+ *  msgToOutSignal(info.channel_name, joy_msg)(sportClient_);
+ *
+ *  // Emergency stop:
+ *  makeStopSignal()(sportClient_);
  */
 
 #pragma once
 
+#include <functional>
+#include <map>
+#include <string>
+
 #include <sensor_msgs/msg/joy.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+
+#include <joy_interpreter/joy_interpreter.hpp>
+
+#include "ros2_b2_sport_client.h"
 #include "unitree_api/msg/request.hpp"
-#include "nlohmann/json.hpp"
 
 namespace rv2_interfaces::rv2_server_control
 {
 
-// ── Unitree Sport API IDs ─────────────────────────────────────────────────────
-//  Matches ROBOT_SPORT_API_ID_* constants in ros2_b2_sport_client.h.
+// ── Output type ───────────────────────────────────────────────────────────────
 
-static constexpr int64_t SPORT_API_ID_DAMP          = 1001;
-static constexpr int64_t SPORT_API_ID_STOPMOVE       = 1003;
-static constexpr int64_t SPORT_API_ID_STANDUP        = 1004;
-static constexpr int64_t SPORT_API_ID_STANDDOWN      = 1005;
-static constexpr int64_t SPORT_API_ID_RECOVERY_STAND = 1006;
-static constexpr int64_t SPORT_API_ID_MOVE           = 1008;
-static constexpr int64_t SPORT_API_ID_SWITCH_GAIT    = 1011;
+/** A callable that issues one sport command on the provided SportClient. */
+using SportClientCmd = std::function<void(SportClient&)>;
 
-// ── Primary templates (no default implementation) ─────────────────────────────
+// ── Primary template (no default implementation) ──────────────────────────────
 
-template<typename outT, typename inT>
-outT msgToOutSignal(const inT & msg);
+template<typename inT>
+SportClientCmd msgToOutSignal(const std::string& id, const inT& msg);
 
-template<typename outT>
-outT makeStopSignal();
+// ── Stop signal ───────────────────────────────────────────────────────────────
 
-// ── Specialisations: unitree_api::msg::Request + Joy ─────────────────────────
-
-template<>
-inline unitree_api::msg::Request msgToOutSignal<unitree_api::msg::Request, sensor_msgs::msg::Joy>(
-    const sensor_msgs::msg::Joy & joy)
+inline SportClientCmd makeStopSignal()
 {
-    const auto & btn = joy.buttons;
-    const size_t nb  = btn.size();
-
-    unitree_api::msg::Request req;
-
-    // Button-mode commands (first match wins)
-    if (nb > 0 && btn[0] == 1) { req.header.identity.api_id = SPORT_API_ID_DAMP;           return req; }
-    if (nb > 1 && btn[1] == 1) { req.header.identity.api_id = SPORT_API_ID_STANDUP;        return req; }
-    if (nb > 2 && btn[2] == 1) { req.header.identity.api_id = SPORT_API_ID_STANDDOWN;      return req; }
-    if (nb > 6 && btn[6] == 1) { req.header.identity.api_id = SPORT_API_ID_STOPMOVE;       return req; }
-    if (nb > 9 && btn[9] == 1) { req.header.identity.api_id = SPORT_API_ID_RECOVERY_STAND; return req; }
-    if (nb > 7 && btn[7] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_SWITCH_GAIT;
-        req.parameter = nlohmann::json{{"data", 0}}.dump();
-        return req;
-    }
-    if (nb > 8 && btn[8] == 1) {
-        req.header.identity.api_id = SPORT_API_ID_SWITCH_GAIT;
-        req.parameter = nlohmann::json{{"data", 1}}.dump();
-        return req;
-    }
-
-    // Default: MOVE from axes[0..3]
-    const auto & ax  = joy.axes;
-    const float  vx   = (ax.size() > 1) ? (ax[0] - ax[1]) : (ax.size() > 0 ? ax[0] : 0.0f);
-    const float  vyaw = (ax.size() > 3) ? (ax[2] - ax[3]) : 0.0f;
-
-    nlohmann::json js;
-    js["x"] = vx;
-    js["y"] = 0.0f;
-    js["z"] = vyaw;
-
-    req.header.identity.api_id = SPORT_API_ID_MOVE;
-    req.parameter              = js.dump();
-    return req;
+    return [](SportClient& sc) {
+        unitree_api::msg::Request req;
+        sc.StopMove(req);
+    };
 }
 
-// ── Specialisations: unitree_api::msg::Request + Twist ───────────────────────
+// ── Specialisation: Joy ───────────────────────────────────────────────────────
 
 template<>
-inline unitree_api::msg::Request msgToOutSignal<unitree_api::msg::Request, geometry_msgs::msg::Twist>(
-    const geometry_msgs::msg::Twist & twist)
+inline SportClientCmd msgToOutSignal<sensor_msgs::msg::Joy>(
+    const std::string& id, const sensor_msgs::msg::Joy& joy)
 {
-    nlohmann::json js;
-    js["x"] = static_cast<float>(twist.linear.x);
-    js["y"] = static_cast<float>(twist.linear.y);
-    js["z"] = static_cast<float>(twist.angular.z);
+    // One JoyInterpreter per channel — maintains FSM state across calls.
+    static std::map<std::string, joy_interpreter::JoyInterpreter> interpreters;
+    const auto action = interpreters[id].update(joy);
 
-    unitree_api::msg::Request req;
-    req.header.identity.api_id = SPORT_API_ID_MOVE;
-    req.parameter              = js.dump();
-    return req;
+    using Event = joy_interpreter::msg::JoyActionEvent;
+    for (const auto& ev : action.events)
+    {
+        if (ev.action_type != Event::PRESS) continue;
+        switch (ev.button_index)
+        {
+            case 0: return [](SportClient& sc){ unitree_api::msg::Request req; sc.Damp(req); };
+            case 1: return [](SportClient& sc){ unitree_api::msg::Request req; sc.StandUp(req); };
+            case 2: return [](SportClient& sc){ unitree_api::msg::Request req; sc.StandDown(req); };
+            case 6: return [](SportClient& sc){ unitree_api::msg::Request req; sc.StopMove(req); };
+            case 7: return [](SportClient& sc){ unitree_api::msg::Request req; sc.SwitchGait(req, 0); };
+            case 8: return [](SportClient& sc){ unitree_api::msg::Request req; sc.SwitchGait(req, 1); };
+            case 9: return [](SportClient& sc){ unitree_api::msg::Request req; sc.RecoveryStand(req); };
+            default: break;
+        }
+    }
+
+    // Default: continuous Move from axes.
+    const auto& ax  = action.axes;
+    const float vx   = (ax.size() > 1) ? (ax[0] - ax[1]) : (ax.size() > 0 ? ax[0] : 0.0f);
+    const float vyaw = (ax.size() > 3) ? (ax[2] - ax[3]) : 0.0f;
+    return [vx, vyaw](SportClient& sc)
+    {
+        unitree_api::msg::Request req;
+        sc.Move(req, vx, 0.0f, vyaw);
+    };
 }
 
-// ── Specialisation: makeStopSignal → unitree_api::msg::Request ────────────────
+// ── Specialisation: Twist ─────────────────────────────────────────────────────
 
 template<>
-inline unitree_api::msg::Request makeStopSignal<unitree_api::msg::Request>()
+inline SportClientCmd msgToOutSignal<geometry_msgs::msg::Twist>(
+    const std::string& id, const geometry_msgs::msg::Twist& twist)
 {
-    unitree_api::msg::Request req;
-    req.header.identity.api_id = SPORT_API_ID_STOPMOVE;
-    return req;
+    (void)id;
+    const float vx   = static_cast<float>(twist.linear.x);
+    const float vy   = static_cast<float>(twist.linear.y);
+    const float vyaw = static_cast<float>(twist.angular.z);
+    return [vx, vy, vyaw](SportClient& sc)
+    {
+        unitree_api::msg::Request req;
+        sc.Move(req, vx, vy, vyaw);
+    };
 }
 
 }  // namespace rv2_interfaces::rv2_server_control
