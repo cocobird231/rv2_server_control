@@ -21,8 +21,8 @@ inline bool isEmergencyStop(const MsgT & msg);
 template <>
 inline bool isEmergencyStop(const sensor_msgs::msg::Joy & joy)
 {
-    if (static_cast<int>(joy.buttons.size()) < 4) return false;
-    return joy.buttons[3] == 1;  // Right pad button (index 3) is the e-stop command for Joy messages.
+    if (static_cast<int>(joy.axes.size()) < 6) return false;
+    return joy.axes[5] < 0.5;  // R2 trigger pressed to stop robot.
 }
 
 template <>
@@ -42,8 +42,7 @@ template <>
 inline bool isRequestActive(const sensor_msgs::msg::Joy & joy)
 {
     if (static_cast<int>(joy.buttons.size()) < 4) return false;
-    return joy.buttons[0] == 99 && joy.buttons[1] == 99 &&
-           joy.buttons[2] == 99 && joy.buttons[3] == 99;
+    return joy.buttons[3] == 1;
 }
 
 template <>

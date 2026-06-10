@@ -40,6 +40,9 @@ ament_target_dependencies(control_server_component
   rv2_control_signal_transport
   joy_interpreter
 )
+target_link_libraries(control_server_component
+  joy_interpreter::joy_interpreter_lib
+)
 rclcpp_components_register_node(control_server_component
   PLUGIN "ControlServerNode"
   EXECUTABLE control_server
