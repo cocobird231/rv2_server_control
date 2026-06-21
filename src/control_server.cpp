@@ -3,9 +3,11 @@
  * and routes them to sport client commands via msgToOutSignal().
  *
  * The control server owns a ControlSignalManager (CSM) that manages remote
- * Source connections. Output is driven by a periodic timer; per-message-type
- * conversion is delegated to output_message_convert.h so that outputCb only
- * needs to invoke the sport client.
+ * Source connections. Output is event-triggered: outputCb runs on each message
+ * received from the active Sink. A low-frequency safety watchdog re-selects a
+ * fallback Sink and issues an emergency stop when signal is lost. Per-message-type
+ * conversion is delegated to output_message_convert.h so that outputCb only needs
+ * to invoke the sport client.
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -29,17 +31,17 @@ public:
     {
         // Declare parameters
         this->declare_parameter<std::string>("server_name",              "control_server");
-        this->declare_parameter<int64_t>    ("output_interval_ms",       50);
+        this->declare_parameter<int64_t>    ("watchdog_interval_ms",     100);
         this->declare_parameter<int64_t>    ("status_timer_interval_ms", 1000);
 
         const std::string serverName          = this->get_parameter("server_name").as_string();
-        const int64_t     outputIntervalMs    = this->get_parameter("output_interval_ms").as_int();
+        const int64_t     watchdogIntervalMs  = this->get_parameter("watchdog_interval_ms").as_int();
         const int64_t     statusTimerMs       = this->get_parameter("status_timer_interval_ms").as_int();
 
         // Build ControlServer config
         rv2_interfaces::rv2_server_control::ControlServer::Config cfg;
         cfg.name                  = serverName;
-        cfg.outputIntervalNs      = outputIntervalMs * 1'000'000LL;
+        cfg.watchdogIntervalNs    = watchdogIntervalMs * 1'000'000LL;
         cfg.statusTimerIntervalMs = statusTimerMs;
 
         server_ = std::make_unique<rv2_interfaces::rv2_server_control::ControlServer>(this, std::move(cfg));
@@ -82,8 +84,9 @@ public:
 
         RCLCPP_INFO(this->get_logger(),
             "ControlServerNode started. Listening on '%s/control_signal_reg'. "
-            "Publishing Unitree sport requests at %ld ms interval.",
-            serverName.c_str(), static_cast<long>(outputIntervalMs));
+            "Publishing Unitree sport requests on each received control message "
+            "(event-triggered); safety watchdog at %ld ms interval.",
+            serverName.c_str(), static_cast<long>(watchdogIntervalMs));
     }
 
 private:

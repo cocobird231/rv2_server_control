@@ -8,15 +8,15 @@ FakeUnitreeApiNode mimics the on-robot Unitree sport API so the full stack
 can be validated without a physical robot.  It receives every
 /api/sport/request, logs it, and publishes a success /api/sport/response.
 
-Using component_container_mt (multi-threaded) ensures that the output timer
-callbacks (ControlServerNode, 20 Hz) and the request subscription callbacks
-(FakeUnitreeApiNode) are dispatched to separate threads and never starve each
-other — which can happen with a single-threaded container at high output rates.
+Using component_container_mt (multi-threaded) ensures that the ControlServerNode
+callbacks (event-triggered output + safety watchdog) and the request subscription
+callbacks (FakeUnitreeApiNode) are dispatched to separate threads and never starve
+each other — which can happen with a single-threaded container at high message rates.
 
 Usage:
     ros2 launch rv2_server_control test_control_server.launch.py
     ros2 launch rv2_server_control test_control_server.launch.py \
-        server_name:=my_server output_interval_ms:=100
+        server_name:=my_server watchdog_interval_ms:=200
 """
 
 from launch import LaunchDescription
@@ -43,10 +43,10 @@ def generate_launch_description():
         default_value='control_server',
         description='Name of the control server (parameter: server_name)',
     )
-    output_interval_arg = DeclareLaunchArgument(
-        'output_interval_ms',
-        default_value='50',
-        description='Output publish interval in milliseconds',
+    watchdog_interval_arg = DeclareLaunchArgument(
+        'watchdog_interval_ms',
+        default_value='100',
+        description='Safety watchdog poll period in milliseconds',
     )
     status_timer_interval_arg = DeclareLaunchArgument(
         'status_timer_interval_ms',
@@ -56,7 +56,7 @@ def generate_launch_description():
 
     # ── Composable node container (multi-threaded) ────────────────────────────
     # component_container_mt is required so that:
-    #   - ControlServerNode's 20 Hz output timer and
+    #   - ControlServerNode's event-triggered output + safety watchdog and
     #   - FakeUnitreeApiNode's /api/sport/request subscription callback
     # can be dispatched to separate executor threads without starving each other.
     container = ComposableNodeContainer(
@@ -73,7 +73,7 @@ def generate_launch_description():
                     LaunchConfiguration('config_file'),
                     {
                         'server_name':              LaunchConfiguration('server_name'),
-                        'output_interval_ms':       LaunchConfiguration('output_interval_ms'),
+                        'watchdog_interval_ms':     LaunchConfiguration('watchdog_interval_ms'),
                         'status_timer_interval_ms': LaunchConfiguration('status_timer_interval_ms'),
                     },
                 ],
@@ -90,7 +90,7 @@ def generate_launch_description():
     return LaunchDescription([
         config_file_arg,
         server_name_arg,
-        output_interval_arg,
+        watchdog_interval_arg,
         status_timer_interval_arg,
         container,
     ])

@@ -11,8 +11,10 @@
  *
  *   - isEmergencyStop  : predicate detecting an e-stop command in a message.
  *   - isRequestActive  : predicate detecting a "request to become active" command.
- *   - outputCb         : called every outputIntervalNs with the active Sink's message.
- *   - emergencyStopCb  : called on e-stop or when no ACTIVE Sink is available.
+ *   - outputCb         : called (event-triggered) on every message received from the
+ *                        active Sink — not on a fixed timer.
+ *   - emergencyStopCb  : called on e-stop or when the active Sink loses signal and no
+ *                        usable Sink remains.
  *
  * Multiple message types (Joy, Twist, String …) can be active simultaneously.
  * Each type maintains its own active-sink selection independently.
@@ -63,10 +65,13 @@ public:
         std::string name;
 
         /**
-         * Output timer period in nanoseconds.
-         * Determines how often outputCb() is called for the active Sink of each type.
+         * Safety-watchdog poll period in nanoseconds.
+         * Output itself is event-triggered (outputCb fires on each message from the
+         * active Sink). This timer only enforces safety: it re-selects a fallback
+         * Sink when the active one stops being usable and fires emergencyStopCb once
+         * when no usable Sink remains.
          */
-        int64_t outputIntervalNs = 100'000'000LL;  // 100 ms
+        int64_t watchdogIntervalNs = 100'000'000LL;  // 100 ms
 
         /**
          * Period of the CSM low-frequency status / disconnect timer in milliseconds.
@@ -102,9 +107,10 @@ public:
         std::function<bool(const msgT&)> isRequestActive;
 
         /**
-         * Called every outputIntervalNs with the latest message from the active Sink
-         * and that Sink's ControlSignalInfo.
-         * Not called when the message is classified as e-stop or request-active.
+         * Called (event-triggered) on every message received from the active Sink,
+         * with that message and the Sink's ControlSignalInfo.
+         * Not called when the message is classified as e-stop or request-active,
+         * nor for messages arriving from a non-active Sink.
          */
         std::function<void(const msgT&, const msg::ControlSignalInfo&)> outputCb;
 
@@ -133,9 +139,9 @@ public:
         , cfg_(std::move(cfg))
         , csm_(node, cfg_.name, cfg_.statusTimerIntervalMs)
     {
-        outputTimer_ = node_->create_wall_timer(
-            std::chrono::nanoseconds(cfg_.outputIntervalNs),
-            [this]() { _outputTimerCb(); });
+        watchdogTimer_ = node_->create_wall_timer(
+            std::chrono::nanoseconds(cfg_.watchdogIntervalNs),
+            [this]() { _watchdogTimerCb(); });
 
         RCLCPP_INFO(node_->get_logger(),
             "[ControlServer:%s] Started. Services: '%s/control_signal_reg', "
@@ -180,8 +186,8 @@ public:
                 _onSinkMsg(msg, info, tid, tcfg);
             });
 
-        // Install the per-type output-timer handler.
-        _installTimerHandler(tcfg, tid);
+        // Install the per-type safety-watchdog handler.
+        _installWatchdogHandler(tcfg, tid);
 
         RCLCPP_INFO(node_->get_logger(),
             "[ControlServer:%s] Registered TypeConfig for '%s'",
@@ -243,6 +249,7 @@ private:
     {
         std::map<std::string, SinkRecord> sinkRecords;  // key: channel_name
         std::string                       activeChannel;
+        bool                              hadUsableSink = false;  // for e-stop edge detection
     };
 
     // ── Members ───────────────────────────────────────────────────────────────
@@ -254,10 +261,10 @@ private:
     mutable std::mutex                   typeMtx_;
     std::map<std::type_index, TypeState> typeStates_;
 
-    mutable std::mutex                timerHandlerMtx_;
-    std::vector<std::function<void()>> timerHandlers_;
+    mutable std::mutex                watchdogHandlerMtx_;
+    std::vector<std::function<void()>> watchdogHandlers_;
 
-    rclcpp::TimerBase::SharedPtr outputTimer_;
+    rclcpp::TimerBase::SharedPtr watchdogTimer_;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -360,6 +367,10 @@ private:
                 // Exclude the e-stop sender so it is not re-selected as active.
                 st.activeChannel = _selectBestLocked(st, info.channel_name);
                 best             = st.activeChannel;
+                // Keep watchdog edge-state consistent: a usable fallback means we
+                // still have signal; no fallback means signal is lost (e-stop just
+                // fired here, so suppress a redundant watchdog e-stop).
+                st.hadUsableSink = !best.empty();
             }
             RCLCPP_WARN(node_->get_logger(),
                 "[ControlServer:%s] E-stop from '%s'. Fallback to '%s'.",
@@ -394,29 +405,49 @@ private:
             }
             return;  // request-active messages not forwarded to outputCb
         }
+
+        // ── Event-triggered output ─────────────────────────────────────────────
+        // A normal control message has arrived.  Drive the output immediately
+        // (rather than via a periodic timer) when, and only when, it comes from
+        // the Sink currently selected as active for this type.
+        std::string activeChannel;
+        {
+            std::lock_guard<std::mutex> lk(typeMtx_);
+            auto it = typeStates_.find(tid);
+            if (it == typeStates_.end()) return;
+            activeChannel = it->second.activeChannel;
+        }
+        if (info.channel_name != activeChannel) return;
+
+        if (tcfg.outputCb) tcfg.outputCb(msg, info);
     }
 
-    /** Called every outputIntervalNs — dispatches to all per-type handlers. */
-    void _outputTimerCb()
+    /** Called every watchdogIntervalNs — dispatches to all per-type handlers. */
+    void _watchdogTimerCb()
     {
-        std::lock_guard<std::mutex> lk(timerHandlerMtx_);
-        for (auto& h : timerHandlers_) h();
+        std::lock_guard<std::mutex> lk(watchdogHandlerMtx_);
+        for (auto& h : watchdogHandlers_) h();
     }
 
     /**
-     * Install a per-type output-timer handler.  The handler reads from the active
-     * Sink and calls outputCb.
+     * Install a per-type safety-watchdog handler.
+     *
+     * Output is event-triggered (see _onSinkMsg); this handler does NOT read or
+     * forward messages.  It only enforces safety on the watchdog timer:
+     *   - if the active Sink is no longer usable, re-select the next-best usable
+     *     Sink as active (output then resumes on that Sink's next message);
+     *   - if no usable Sink remains, fire emergencyStopCb once on the
+     *     loss-of-signal edge.
      */
     template<typename msgT>
-    void _installTimerHandler(TypeConfig<msgT> tcfg, std::type_index tid)
+    void _installWatchdogHandler(TypeConfig<msgT> tcfg, std::type_index tid)
     {
-        std::lock_guard<std::mutex> lk(timerHandlerMtx_);
-        timerHandlers_.push_back([this, tcfg, tid]()
+        std::lock_guard<std::mutex> lk(watchdogHandlerMtx_);
+        watchdogHandlers_.push_back([this, tcfg, tid]()
         {
             // Snapshot the relevant TypeState under lock.
-            std::string         activeChannel;
-            SinkRecord          activeRec;
-            TypeState           snapshot;
+            std::string activeChannel;
+            TypeState   snapshot;
             {
                 std::lock_guard<std::mutex> lk2(typeMtx_);
                 auto it = typeStates_.find(tid);
@@ -424,54 +455,60 @@ private:
                 snapshot      = it->second;
                 activeChannel = it->second.activeChannel;
             }
-            if (snapshot.sinkRecords.empty()) return;
 
-            // Resolve active Sink.
+            // Is the currently-active Sink still usable?
             auto activeIt = snapshot.sinkRecords.find(activeChannel);
             const ControlSignalState activeSt =
                 (activeIt != snapshot.sinkRecords.end() && activeIt->second.sink)
                     ? activeIt->second.sink->getState()
                     : ControlSignalState::UNKNOWN;
-            bool needFallback =
-                (activeIt == snapshot.sinkRecords.end() ||
-                 !activeIt->second.sink ||
-                 (activeSt != ControlSignalState::ACTIVE &&
-                  activeSt != ControlSignalState::LOW_FREQ));
+            const bool activeUsable =
+                (activeSt == ControlSignalState::ACTIVE ||
+                 activeSt == ControlSignalState::LOW_FREQ);
 
-            if (needFallback)
+            if (activeUsable)
             {
-                const std::string best = _selectBestLocked(snapshot);
-                {
-                    std::lock_guard<std::mutex> lk2(typeMtx_);
-                    auto it = typeStates_.find(tid);
-                    if (it != typeStates_.end())
-                        it->second.activeChannel = best;
-                }
-
-                if (best.empty())
-                {
-                    RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
-                        "[ControlServer:%s] No ACTIVE sink — e-stop.", cfg_.name.c_str());
-                    if (tcfg.emergencyStopCb)
-                        tcfg.emergencyStopCb(msg::ControlSignalInfo{});
-                    return;
-                }
-                activeIt = snapshot.sinkRecords.find(best);
-                if (activeIt == snapshot.sinkRecords.end()) return;
+                std::lock_guard<std::mutex> lk2(typeMtx_);
+                auto it = typeStates_.find(tid);
+                if (it != typeStates_.end()) it->second.hadUsableSink = true;
+                return;
             }
 
-            // Read from the active Sink without knowing its concrete
-            // ControlSignalSink<msgT, srvT> specialisation: readErased() copies
-            // the latest msgT into outMsg via the type-erased base interface.
-            msgT outMsg;
-            if (!activeIt->second.sink->readErased(&outMsg)) return;
+            // Active Sink lost — try to fall back to the next-best usable Sink.
+            const std::string best = _selectBestLocked(snapshot);
+            if (!best.empty())
+            {
+                std::lock_guard<std::mutex> lk2(typeMtx_);
+                auto it = typeStates_.find(tid);
+                if (it != typeStates_.end())
+                {
+                    if (it->second.activeChannel != best)
+                        RCLCPP_INFO(node_->get_logger(),
+                            "[ControlServer:%s] Active Sink lost — fell back to '%s'.",
+                            cfg_.name.c_str(), best.c_str());
+                    it->second.activeChannel = best;
+                    it->second.hadUsableSink = true;
+                }
+                return;
+            }
 
-            // Skip special messages.
-            const bool isEStop    = tcfg.isEmergencyStop && tcfg.isEmergencyStop(outMsg);
-            const bool isReqActive = tcfg.isRequestActive && tcfg.isRequestActive(outMsg);
-            if (isEStop || isReqActive) return;
-
-            if (tcfg.outputCb) tcfg.outputCb(outMsg, activeIt->second.sink->getInfo());
+            // No usable Sink at all — fire e-stop once on the loss-of-signal edge.
+            bool prevHad = false;
+            {
+                std::lock_guard<std::mutex> lk2(typeMtx_);
+                auto it = typeStates_.find(tid);
+                if (it == typeStates_.end()) return;
+                prevHad                  = it->second.hadUsableSink;
+                it->second.hadUsableSink = false;
+            }
+            if (prevHad)
+            {
+                RCLCPP_WARN(node_->get_logger(),
+                    "[ControlServer:%s] Active Sink lost and no usable Sink remains — e-stop.",
+                    cfg_.name.c_str());
+                if (tcfg.emergencyStopCb)
+                    tcfg.emergencyStopCb(msg::ControlSignalInfo{});
+            }
         });
     }
 };

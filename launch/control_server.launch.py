@@ -9,14 +9,14 @@ For the dev/debug variant (with FakeUnitreeApiNode), use:
 
 Launch arguments
 ────────────────
-  server_name        CSM name exposed by this server  (default: control_server)
-  output_interval_ms Output publish interval [ms]     (default: 50)
+  server_name          CSM name exposed by this server  (default: control_server)
+  watchdog_interval_ms Safety watchdog poll period [ms] (default: 100)
 
 Usage
 ─────
   ros2 launch rv2_server_control control_server.launch.py
   ros2 launch rv2_server_control control_server.launch.py \\
-      server_name:=my_robot  output_interval_ms:=100
+      server_name:=my_robot  watchdog_interval_ms:=200
 """
 
 from launch import LaunchDescription
@@ -41,8 +41,8 @@ def generate_launch_description():
             'server_name', default_value='control_server',
             description='CSM name exposed by ControlServerNode'),
         DeclareLaunchArgument(
-            'output_interval_ms', default_value='50',
-            description='Output publish interval in milliseconds'),
+            'watchdog_interval_ms', default_value='100',
+            description='Safety watchdog poll period in milliseconds'),
     ]
 
     container = ComposableNodeContainer(
@@ -59,7 +59,7 @@ def generate_launch_description():
                     LaunchConfiguration('config_file'),
                     {
                         'server_name':        LaunchConfiguration('server_name'),
-                        'output_interval_ms': LaunchConfiguration('output_interval_ms'),
+                        'watchdog_interval_ms': LaunchConfiguration('watchdog_interval_ms'),
                     },
                 ],
             ),

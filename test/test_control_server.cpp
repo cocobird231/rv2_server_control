@@ -282,7 +282,7 @@ bool testCS1_SingleTypeFirstSinkActive(
     if (active != "cs1/joy_a")
         FAIL("CS1", ("expected active='cs1/joy_a', got='" + active + "'").c_str());
 
-    // outputCb should have fired at least once via the output timer
+    // outputCb should have fired at least once (event-triggered on message arrival)
     rclcpp::sleep_for(200ms);
     if (tracker.outputCount.load() == 0)
         FAIL("CS1", "outputCb never called");
@@ -519,7 +519,7 @@ bool testCS5_FallbackOnTimeout(
         rclcpp::sleep_for(200ms);
     }
     // By now: high Sink → TIMEOUT; low Sink → ACTIVE
-    // The output timer should have fallen back to 'joy_low'
+    // The safety watchdog should have fallen back to 'joy_low'
     rclcpp::sleep_for(150ms);
 
     auto active = cs.getActiveSinkChannel<Joy>();
@@ -745,9 +745,15 @@ bool testCS9_OutputCbActiveOnly(
     srcB->send(makeJoy(0.2f), ok);
     rclcpp::sleep_for(100ms);
 
-    // Wait for several output ticks; channel should always be A
+    // Output is event-triggered: send several more messages from BOTH sinks.
+    // Only the active sink (A) must drive outputCb.
     tracker.outputCount = 0;
-    rclcpp::sleep_for(300ms);
+    for (int i = 0; i < 3; ++i)
+    {
+        srcA->send(makeJoy(1.0f), ok);
+        srcB->send(makeJoy(0.2f), ok);
+        rclcpp::sleep_for(100ms);
+    }
     {
         std::lock_guard<std::mutex> lk(tracker.mtx);
         if (!tracker.lastOutputChannel.empty() && tracker.lastOutputChannel != "cs9/joy_a")
@@ -796,7 +802,7 @@ bool testCS10_NoActiveSink(
     tracker.estopCount  = 0;
     rclcpp::sleep_for(700ms);   // well past timeout
 
-    // By now the output timer should have detected no ACTIVE Sink and fired emergencyStopCb
+    // By now the watchdog should have detected no usable Sink and fired emergencyStopCb
     if (tracker.estopCount.load() == 0)
         FAIL("CS10", "emergencyStopCb should fire when no ACTIVE Sink available");
 
@@ -846,11 +852,11 @@ bool testCS11_ServiceModeOutputCb(
     if (active != "cs11/joy_svc")
         FAIL("CS11", ("expected active='cs11/joy_svc', got='" + active + "'").c_str());
 
-    // outputCb must fire from the output timer — exercises the SrvT cast path
-    // in _installTimerHandler (the void cast fails; the SrvT cast succeeds).
+    // outputCb must fire on message arrival — exercises the SrvT service path
+    // (the typed Sink delivers the message that drives event-triggered output).
     rclcpp::sleep_for(200ms);
     if (tracker.outputCount.load() == 0)
-        FAIL("CS11", "outputCb never called — service-type cast in _installTimerHandler failed");
+        FAIL("CS11", "outputCb never called — service-mode message did not drive output");
 
     PASS("CS11  Service mode — outputCb fired via ControlSignalSink<Joy,SrvT> cast");
     return true;
