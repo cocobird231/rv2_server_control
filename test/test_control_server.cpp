@@ -34,12 +34,20 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rv2_interfaces/srv/control_signal_joy.hpp>
+#include <rv2_interfaces/srv/control_signal_twist.hpp>
 
 using namespace rv2_interfaces;
 using namespace rv2_interfaces::rv2_server_control;
 using namespace std::chrono_literals;
 using Joy   = sensor_msgs::msg::Joy;
 using Twist = geometry_msgs::msg::Twist;
+
+// Concrete Source types as registered with ControlSignalFactory
+// (see control_signal_types.cpp). The factory always instantiates the
+// service-bound specialisation for Joy/Twist — regardless of topic vs service
+// mode — so getSource() must be down-cast to these exact types.
+using JoySource   = ControlSignalSource<Joy,   rv2_interfaces::srv::ControlSignalJoy>;
+using TwistSource = ControlSignalSource<Twist, rv2_interfaces::srv::ControlSignalTwist>;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -270,7 +278,7 @@ bool testCS1_SingleTypeFirstSinkActive(
     rclcpp::sleep_for(300ms);   // topic discovery
 
     // Send a normal Joy message via the Source
-    auto* src = dynamic_cast<ControlSignalSource<Joy>*>(srcCsm.getSource("cs1/joy_a").get());
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs1/joy_a").get());
     if (!src) FAIL("CS1", "getSource returned nullptr");
 
     bool ok;
@@ -315,9 +323,9 @@ bool testCS2_MultipleTypeConfigs(
 
     rclcpp::sleep_for(300ms);
 
-    auto* joySrc = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* joySrc = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs2/joy").get());
-    auto* twsSrc = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* twsSrc = dynamic_cast<TwistSource*>(
         srcCsm.getSource("cs2/twist").get());
     if (!joySrc || !twsSrc) FAIL("CS2", "getSource returned nullptr");
 
@@ -371,9 +379,9 @@ bool testCS3_PriorityAutoSelect(
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS3", "high registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* srcLow  = dynamic_cast<JoySource*>(
         csmLow.getSource("cs3/joy_low").get());
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* srcHigh = dynamic_cast<JoySource*>(
         csmHigh.getSource("cs3/joy_high").get());
     if (!srcLow || !srcHigh) FAIL("CS3", "getSource nullptr");
 
@@ -433,8 +441,8 @@ bool testCS4_ManualActiveSinkOverride(
     if (!csmRegisterSource(csmB, infoB)) FAIL("CS4", "B registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcA = dynamic_cast<ControlSignalSource<Joy>*>(csmA.getSource("cs4/joy_a").get());
-    auto* srcB = dynamic_cast<ControlSignalSource<Joy>*>(csmB.getSource("cs4/joy_b").get());
+    auto* srcA = dynamic_cast<JoySource*>(csmA.getSource("cs4/joy_a").get());
+    auto* srcB = dynamic_cast<JoySource*>(csmB.getSource("cs4/joy_b").get());
     if (!srcA || !srcB) FAIL("CS4", "getSource nullptr");
 
     bool ok;
@@ -494,8 +502,8 @@ bool testCS5_FallbackOnTimeout(
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS5", "low registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Joy>*>(csmHigh.getSource("cs5/joy_high").get());
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Joy>*>(csmLow.getSource("cs5/joy_low").get());
+    auto* srcHigh = dynamic_cast<JoySource*>(csmHigh.getSource("cs5/joy_high").get());
+    auto* srcLow  = dynamic_cast<JoySource*>(csmLow.getSource("cs5/joy_low").get());
     if (!srcHigh || !srcLow) FAIL("CS5", "getSource nullptr");
 
     bool ok;
@@ -555,8 +563,8 @@ bool testCS6_EmergencyStop(
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS6", "low registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Joy>*>(csmHigh.getSource("cs6/joy_high").get());
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Joy>*>(csmLow.getSource("cs6/joy_low").get());
+    auto* srcHigh = dynamic_cast<JoySource*>(csmHigh.getSource("cs6/joy_high").get());
+    auto* srcLow  = dynamic_cast<JoySource*>(csmLow.getSource("cs6/joy_low").get());
     if (!srcHigh || !srcLow) FAIL("CS6", "getSource nullptr");
 
     bool ok;
@@ -613,8 +621,8 @@ bool testCS7_RequestActive(
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS7", "high registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Joy>*>(csmLow.getSource("cs7/joy_low").get());
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Joy>*>(csmHigh.getSource("cs7/joy_high").get());
+    auto* srcLow  = dynamic_cast<JoySource*>(csmLow.getSource("cs7/joy_low").get());
+    auto* srcHigh = dynamic_cast<JoySource*>(csmHigh.getSource("cs7/joy_high").get());
     if (!srcLow || !srcHigh) FAIL("CS7", "getSource nullptr");
 
     bool ok;
@@ -673,8 +681,8 @@ bool testCS8_EmergencyStopPrioritySink(
     if (!csmRegisterSource(csmEstop,  infoEstop))  FAIL("CS8", "estop registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcNormal = dynamic_cast<ControlSignalSource<Joy>*>(csmNormal.getSource("cs8/joy_normal").get());
-    auto* srcEstop  = dynamic_cast<ControlSignalSource<Joy>*>(csmEstop.getSource("cs8/joy_estop").get());
+    auto* srcNormal = dynamic_cast<JoySource*>(csmNormal.getSource("cs8/joy_normal").get());
+    auto* srcEstop  = dynamic_cast<JoySource*>(csmEstop.getSource("cs8/joy_estop").get());
     if (!srcNormal || !srcEstop) FAIL("CS8", "getSource nullptr");
 
     bool ok;
@@ -728,8 +736,8 @@ bool testCS9_OutputCbActiveOnly(
     if (!csmRegisterSource(csmB, infoB)) FAIL("CS9", "B registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcA = dynamic_cast<ControlSignalSource<Joy>*>(csmA.getSource("cs9/joy_a").get());
-    auto* srcB = dynamic_cast<ControlSignalSource<Joy>*>(csmB.getSource("cs9/joy_b").get());
+    auto* srcA = dynamic_cast<JoySource*>(csmA.getSource("cs9/joy_a").get());
+    auto* srcB = dynamic_cast<JoySource*>(csmB.getSource("cs9/joy_b").get());
     if (!srcA || !srcB) FAIL("CS9", "getSource nullptr");
 
     bool ok;
@@ -787,7 +795,7 @@ bool testCS10_NoActiveSink(
     if (!csmRegisterSource(csmSrc, info)) FAIL("CS10", "registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* src = dynamic_cast<ControlSignalSource<Joy>*>(csmSrc.getSource("cs10/joy").get());
+    auto* src = dynamic_cast<JoySource*>(csmSrc.getSource("cs10/joy").get());
     if (!src) FAIL("CS10", "getSource nullptr");
 
     bool ok;
@@ -891,7 +899,7 @@ bool testCS12_ServiceModeEmergencyStop(
 
     auto* srcHigh = dynamic_cast<ControlSignalSource<Joy, rv2_interfaces::srv::ControlSignalJoy>*>(
         csmHigh.getSource("cs12/joy_high").get());
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* srcLow  = dynamic_cast<JoySource*>(
         csmLow.getSource("cs12/joy_low").get());
     if (!srcHigh || !srcLow) FAIL("CS12", "getSource nullptr");
 
@@ -946,7 +954,7 @@ bool testCS13_JoyButtonCommands(
         FAIL("CS13", "registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* src = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* src = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs13/joy").get());
     if (!src) FAIL("CS13", "getSource nullptr");
 
@@ -1019,7 +1027,7 @@ bool testCS14_JoyAxesMoveConversion(
         FAIL("CS14", "registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* src = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* src = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs14/joy").get());
     if (!src) FAIL("CS14", "getSource nullptr");
 
@@ -1075,7 +1083,7 @@ bool testCS15_TwistOutputCbConversion(
         FAIL("CS15", "registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* src = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* src = dynamic_cast<TwistSource*>(
         srcCsm.getSource("cs15/twist").get());
     if (!src) FAIL("CS15", "getSource nullptr");
 
@@ -1131,9 +1139,9 @@ bool testCS16_TwistEmergencyStop(
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS16", "low registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* srcHigh = dynamic_cast<TwistSource*>(
         csmHigh.getSource("cs16/twist_high").get());
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* srcLow  = dynamic_cast<TwistSource*>(
         csmLow.getSource("cs16/twist_low").get());
     if (!srcHigh || !srcLow) FAIL("CS16", "getSource nullptr");
 
@@ -1186,9 +1194,9 @@ bool testCS17_TwistRequestActive(
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS17", "high registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* srcLow  = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* srcLow  = dynamic_cast<TwistSource*>(
         csmLow.getSource("cs17/twist_low").get());
-    auto* srcHigh = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* srcHigh = dynamic_cast<TwistSource*>(
         csmHigh.getSource("cs17/twist_high").get());
     if (!srcLow || !srcHigh) FAIL("CS17", "getSource nullptr");
 
@@ -1248,9 +1256,9 @@ bool testCS18_JoyTwistConversionValues(
         FAIL("CS18", "twist registerSource failed");
     rclcpp::sleep_for(300ms);
 
-    auto* joySrc = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* joySrc = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs18/joy").get());
-    auto* twsSrc = dynamic_cast<ControlSignalSource<Twist>*>(
+    auto* twsSrc = dynamic_cast<TwistSource*>(
         srcCsm.getSource("cs18/twist").get());
     if (!joySrc || !twsSrc) FAIL("CS18", "getSource nullptr");
 
@@ -1336,9 +1344,9 @@ bool testCS19_FallbackToLowFreq(
         FAIL("CS19", "md registerSource failed");
     rclcpp::sleep_for(300ms);   // topic discovery
 
-    auto* hiSrc = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* hiSrc = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs19/joy_hi").get());
-    auto* mdSrc = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* mdSrc = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs19/joy_md").get());
     if (!hiSrc || !mdSrc) FAIL("CS19", "getSource nullptr");
 
@@ -1400,7 +1408,7 @@ bool testCS20_AutoDisconnectTimeout(
         FAIL("CS20", "registerSource failed");
     rclcpp::sleep_for(300ms);   // topic discovery
 
-    auto* src = dynamic_cast<ControlSignalSource<Joy>*>(
+    auto* src = dynamic_cast<JoySource*>(
         srcCsm.getSource("cs20/joy").get());
     if (!src) FAIL("CS20", "getSource nullptr");
 
