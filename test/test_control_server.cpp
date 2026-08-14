@@ -14,11 +14,35 @@
  *  CS5  Fallback on Sink timeout — active switches to next-best ACTIVE Sink
  *  CS6  E-stop detection — emergencyStopCb fires; active Sink falls back
  *  CS7  Request-active — lower-priority Sink requests promotion; accepted if higher-pri
- *  CS8  EMERGENCY_STOP priority Sink — never selected as normal active; triggers e-stop
+ *  CS8  EMERGENCY_STOP priority Sink — never selectable (auto or manual);
+ *       normal messages from it do NOT fire emergencyStopCb (content-triggered only)
  *  CS9  outputCb receives messages from active Sink only
  *  CS10 No active Sink available — outputCb not called; emergencyStopCb fires
  *  CS11 Service mode — Joy source in SERVICE mode; outputCb fires via service-type cast
  *  CS12 Service mode — e-stop via service call; emergencyStopCb fires; fallback works
+ *  CS13 Joy button messages (A/X/Y) delivered to outputCb with correct values
+ *  CS14 Joy axes MOVE — axes[0..2] captured; vx/vy/vyaw mapping verified
+ *  CS15 Twist single source — outputCb fires; linear.x/y + angular.z verified
+ *  CS16 Twist e-stop — emergencyStopCb fires; active Sink falls back
+ *  CS17 Twist request-active — HIGH promoted; LOW rejected
+ *  CS18 Joy + Twist simultaneous — both outputCbs fire; values verified
+ *  CS19 Fallback to LOW_FREQ Sink when ACTIVE unavailable
+ *  CS20 Auto-disconnect on disconnect_timeout_ns
+ *
+ * Joy/Twist → unitree_api Request integration (full chain through
+ * msgToOutSignal → SportClient → /api/sport/request):
+ *  CS21 Joy buttons A/B/X/Y → StandUp/StandDown/StopMove/RecoveryStand api_ids
+ *  CS22 PRESS edge — held button fires exactly once; re-press fires again
+ *  CS23 Move dedup — identical (vx,vy,vyaw) not re-sent; changes are sent
+ *  CS24 Idle joystick (all zeros) from startup → zero unitree requests
+ *  CS25 Twist Move dedup — identical Twist not re-sent
+ *  CS26 Joy e-stop → StopMove request published
+ *  CS27 Per-axis Move — vx/vy/vyaw individually and combined (incl. negative
+ *       values); unused axes (right V, L2 trigger) produce no output
+ *
+ * Joy mapping under test (real Xbox driver axis layout):
+ *   axes[0]=vx, axes[1]=vy, axes[3]=vyaw  (axes[2]/[5] = L2/R2 triggers)
+ *   buttons[0]=A(StandUp), [1]=B(StandDown), [2]=X(StopMove), [3]=Y(RecoveryStand)
  */
 
 #include <atomic>
@@ -29,7 +53,11 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rv2_server_control/control_server.h"
+#include "rv2_server_control/output_message_convert.h"
 #include "rv2_control_signal_transport/control_signal_manager.h"
+
+#include "unitree_api/msg/request.hpp"
+#include "nlohmann/json.hpp"
 
 #include <sensor_msgs/msg/joy.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -174,24 +202,37 @@ static Twist makeTwistReqActive()
     return t;
 }
 // ── Joy button / axes helpers ─────────────────────────────────────────────────
-//  makeJoyButton — allocates 10 buttons (to match joyToUnitreeRequest mapping)
-//                  and sets buttons[btnIdx] = value; all axes = 0.
+//  makeJoyButton — allocates 17 buttons (docs/joy按鍵定義 layout) and sets
+//                  buttons[btnIdx] = value; sticks at 0, L2/R2 released (+1.0).
+//                  btnIdx < 0 → all buttons released.
 static Joy makeJoyButton(int btnIdx, int value = 1)
 {
     Joy j;
-    j.buttons.assign(10, 0);
-    j.axes.assign(4, 0.0f);
-    if (btnIdx >= 0 && btnIdx < 10)
+    j.buttons.assign(17, 0);
+    j.axes = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    if (btnIdx >= 0 && btnIdx < 17)
         j.buttons[btnIdx] = value;
     return j;
 }
-//  makeJoyAxes — axes[0]=fwd, axes[1]=bck, axes[2]=turnLeft, axes[3]=turnRight
-//               → vx = fwd-bck,  vy = 0,  vyaw = left-right
-static Joy makeJoyAxes(float fwd, float bck, float left, float right)
+//  makeJoyAxes — real Xbox driver layout: axes[0]=vx (left H), axes[1]=vy
+//               (left V), axes[3]=vyaw (right H); axes[2]/[5] are the L2/R2
+//               triggers, released = +1.0 (axes[5] < 0.5 is the e-stop
+//               sentinel in control_signal_detect.h).
+static Joy makeJoyAxes(float vx, float vy = 0.0f, float vyaw = 0.0f)
 {
     Joy j;
-    j.axes    = {fwd, bck, left, right};
-    j.buttons.assign(10, 0);
+    j.axes    = {vx, vy, 1.0f, vyaw, 0.0f, 1.0f, 0.0f, 0.0f};
+    j.buttons.assign(17, 0);
+    return j;
+}
+//  makeJoyAxesFull — like makeJoyAxes but with explicit unused axes
+//                    (right stick vertical, L2 trigger) for no-output checks.
+static Joy makeJoyAxesFull(float vx, float vy, float vyaw,
+                           float rightV, float l2 = 1.0f)
+{
+    Joy j;
+    j.axes    = {vx, vy, l2, vyaw, rightV, 1.0f, 0.0f, 0.0f};
+    j.buttons.assign(17, 0);
     return j;
 }
 
@@ -652,13 +693,29 @@ bool testCS7_RequestActive(
     if (cs.getActiveSinkChannel<Joy>() != "cs7/joy_high")
         FAIL("CS7", "LOW request-active should not steal active from HIGH");
 
-    PASS("CS7  Request-active — HIGH promoted; LOW rejected (insufficient priority)");
+    // EQUAL priority tries request-active → must also be rejected
+    // (takeover requires priority STRICTLY greater than the incumbent's).
+    ControlSignalManager csmEq(srcNodeLow.get(), "cs7_csm_eq");
+    auto infoEq = makeInfo("cs7/joy_eq", TYPE_JOY, MODE_TOPIC, "cs7_server",
+                           msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+    if (!csmRegisterSource(csmEq, infoEq)) FAIL("CS7", "eq registerSource failed");
+    rclcpp::sleep_for(300ms);
+    auto* srcEq = dynamic_cast<JoySource*>(csmEq.getSource("cs7/joy_eq").get());
+    if (!srcEq) FAIL("CS7", "eq getSource nullptr");
+
+    srcEq->send(makeJoyReqActive(), ok);
+    rclcpp::sleep_for(200ms);
+    if (cs.getActiveSinkChannel<Joy>() != "cs7/joy_high")
+        FAIL("CS7", "EQUAL-priority request-active must not steal active (strictly-greater rule)");
+
+    PASS("CS7  Request-active — HIGH promoted; LOW and EQUAL rejected (strictly-greater rule)");
     return true;
 }
 
 
 // ════════════════════════════════════════════════════════════════════════════
-//  CS8 — EMERGENCY_STOP priority Sink: never selected as active; triggers e-stop
+//  CS8 — EMERGENCY_STOP priority Sink: never selectable (auto or manual);
+//        a normal message from it does NOT fire emergencyStopCb
 // ════════════════════════════════════════════════════════════════════════════
 bool testCS8_EmergencyStopPrioritySink(
     rclcpp::Node::SharedPtr csNode,
@@ -696,18 +753,32 @@ bool testCS8_EmergencyStopPrioritySink(
     if (active != "cs8/joy_normal")
         FAIL("CS8", ("expected active='cs8/joy_normal', got='" + active + "'").c_str());
 
-    // EMERGENCY_STOP priority Sink sends a normal message → e-stop cb fires
-    // (because all ACTIVE sinks with ESTOP priority always trigger e-stop)
+    // A NORMAL message from the EMERGENCY_STOP-priority Sink must NOT fire
+    // emergencyStopCb — e-stop is content-triggered (isEmergencyStop) only.
+    // The Sink is merely never selectable as output.
     tracker.estopCount = 0;
     srcEstop->send(makeJoy(1.0f), ok);
     rclcpp::sleep_for(300ms);
+
+    {
+        std::lock_guard<std::mutex> lk(tracker.mtx);
+        if (tracker.estopCount != 0)
+            FAIL("CS8", "normal msg from ESTOP-priority Sink must not fire emergencyStopCb");
+    }
 
     // Active should still be (or revert to) 'cs8/joy_normal'
     active = cs.getActiveSinkChannel<Joy>();
     if (active == "cs8/joy_estop")
         FAIL("CS8", "EMERGENCY_STOP priority Sink must not become active after normal msg");
 
-    PASS("CS8  EMERGENCY_STOP priority Sink — never selected; e-stop on any message");
+    // Manual activation of an ESTOP-priority Sink must be refused as well.
+    if (cs.setActiveSink<Joy>("cs8/joy_estop"))
+        FAIL("CS8", "setActiveSink must refuse an EMERGENCY_STOP-priority Sink");
+    if (cs.getActiveSinkChannel<Joy>() != "cs8/joy_normal")
+        FAIL("CS8", "active must remain 'cs8/joy_normal' after refused manual activation");
+
+    PASS("CS8  EMERGENCY_STOP priority Sink — never selectable (auto or manual); "
+         "normal msgs don't fire e-stop");
     return true;
 }
 
@@ -960,58 +1031,58 @@ bool testCS13_JoyButtonCommands(
 
     bool ok;
     // Activate the sink first with a plain MOVE message
-    src->send(makeJoyAxes(0.5f, 0.0f, 0.0f, 0.0f), ok);
+    src->send(makeJoyAxes(0.5f), ok);
     rclcpp::sleep_for(200ms);
     if (cs.getActiveSinkChannel<Joy>() != "cs13/joy")
         FAIL("CS13", "sink not active after initial MOVE message");
 
-    // ── buttons[1] = 1  (StandUp, api_id 1004) ───────────────────────────────
+    // ── buttons[0] = 1  (A → StandUp, api_id 1004) ───────────────────────────
     tracker.outputCount = 0;
-    src->send(makeJoyButton(1), ok);
+    src->send(makeJoyButton(JOY_BTN_A), ok);
     rclcpp::sleep_for(200ms);
     {
         std::lock_guard<std::mutex> lk(tracker.mtx);
         if (tracker.outputCount == 0)
-            FAIL("CS13", "outputCb not called for StandUp (buttons[1]=1)");
+            FAIL("CS13", "outputCb not called for StandUp (buttons[0]=1)");
         const auto& btn = tracker.lastOutputMsg.buttons;
-        if (static_cast<int>(btn.size()) < 2 || btn[1] != 1)
-            FAIL("CS13", "captured msg: buttons[1] != 1 for StandUp");
+        if (static_cast<int>(btn.size()) < 1 || btn[JOY_BTN_A] != 1)
+            FAIL("CS13", "captured msg: buttons[0] != 1 for StandUp");
     }
 
-    // ── buttons[6] = 1  (StopMove, api_id 1003) ──────────────────────────────
+    // ── buttons[2] = 1  (X → StopMove, api_id 1003) ──────────────────────────
     tracker.outputCount = 0;
-    src->send(makeJoyButton(6), ok);
+    src->send(makeJoyButton(JOY_BTN_X), ok);
     rclcpp::sleep_for(200ms);
     {
         std::lock_guard<std::mutex> lk(tracker.mtx);
         if (tracker.outputCount == 0)
-            FAIL("CS13", "outputCb not called for StopMove (buttons[6]=1)");
+            FAIL("CS13", "outputCb not called for StopMove (buttons[2]=1)");
         const auto& btn = tracker.lastOutputMsg.buttons;
-        if (static_cast<int>(btn.size()) < 7 || btn[6] != 1)
-            FAIL("CS13", "captured msg: buttons[6] != 1 for StopMove");
+        if (static_cast<int>(btn.size()) < 3 || btn[JOY_BTN_X] != 1)
+            FAIL("CS13", "captured msg: buttons[2] != 1 for StopMove");
     }
 
-    // ── buttons[9] = 1  (RecoveryStand, api_id 1006) ─────────────────────────
+    // ── buttons[3] = 1  (Y → RecoveryStand, api_id 1006) ─────────────────────
     tracker.outputCount = 0;
-    src->send(makeJoyButton(9), ok);
+    src->send(makeJoyButton(JOY_BTN_Y), ok);
     rclcpp::sleep_for(200ms);
     {
         std::lock_guard<std::mutex> lk(tracker.mtx);
         if (tracker.outputCount == 0)
-            FAIL("CS13", "outputCb not called for RecoveryStand (buttons[9]=1)");
+            FAIL("CS13", "outputCb not called for RecoveryStand (buttons[3]=1)");
         const auto& btn = tracker.lastOutputMsg.buttons;
-        if (static_cast<int>(btn.size()) < 10 || btn[9] != 1)
-            FAIL("CS13", "captured msg: buttons[9] != 1 for RecoveryStand");
+        if (static_cast<int>(btn.size()) < 4 || btn[JOY_BTN_Y] != 1)
+            FAIL("CS13", "captured msg: buttons[3] != 1 for RecoveryStand");
     }
 
-    PASS("CS13  Joy button commands — StandUp/StopMove/RecoveryStand delivered to outputCb");
+    PASS("CS13  Joy button commands — A/X/Y button messages delivered to outputCb");
     return true;
 }
 
 
 // ════════════════════════════════════════════════════════════════════════════
-//  CS14 — Joy axes MOVE: axes[0..3] captured correctly; vx/vyaw verified
-//         vx = axes[0]-axes[1],  vyaw = axes[2]-axes[3]  (joyToUnitreeRequest logic)
+//  CS14 — Joy axes MOVE: axes captured correctly; vx/vy/vyaw verified
+//         vx = axes[0],  vy = axes[1],  vyaw = axes[3]  (joyToSportClientCmd)
 // ════════════════════════════════════════════════════════════════════════════
 bool testCS14_JoyAxesMoveConversion(
     rclcpp::Node::SharedPtr csNode,
@@ -1032,11 +1103,10 @@ bool testCS14_JoyAxesMoveConversion(
     if (!src) FAIL("CS14", "getSource nullptr");
 
     bool ok;
-    // axes[0]=1.0 (fwd), axes[1]=0.3 (bck), axes[2]=0.5 (left), axes[3]=0.2 (right)
-    // → vx = 1.0 - 0.3 = 0.7,  vy = 0,  vyaw = 0.5 - 0.2 = 0.3
-    const float FWD = 1.0f, BCK = 0.3f, LEFT = 0.5f, RIGHT = 0.2f;
+    // axes[0]=0.7 (vx), axes[1]=0.2 (vy), axes[3]=0.3 (vyaw)
+    const float VX = 0.7f, VY = 0.2f, VYAW = 0.3f;
     tracker.outputCount = 0;
-    src->send(makeJoyAxes(FWD, BCK, LEFT, RIGHT), ok);
+    src->send(makeJoyAxes(VX, VY, VYAW), ok);
     rclcpp::sleep_for(300ms);
 
     {
@@ -1046,21 +1116,16 @@ bool testCS14_JoyAxesMoveConversion(
         const auto& ax = tracker.lastOutputMsg.axes;
         if (static_cast<int>(ax.size()) < 4)
             FAIL("CS14", "captured Joy has fewer than 4 axes");
-        if (std::abs(ax[0] - FWD)   > 1e-4f ||
-            std::abs(ax[1] - BCK)   > 1e-4f ||
-            std::abs(ax[2] - LEFT)  > 1e-4f ||
-            std::abs(ax[3] - RIGHT) > 1e-4f)
-            FAIL("CS14", "captured axes do not match sent values");
-        // Verify conversion arithmetic mirroring joyToUnitreeRequest()
-        const float vx   = ax[0] - ax[1];   // 0.7
-        const float vyaw = ax[2] - ax[3];   // 0.3
-        if (std::abs(vx   - 0.7f) > 1e-3f)
-            FAIL("CS14", "computed vx mismatch (expected 0.7)");
-        if (std::abs(vyaw - 0.3f) > 1e-3f)
-            FAIL("CS14", "computed vyaw mismatch (expected 0.3)");
+        // Direct mapping: axes[0]=vx, axes[1]=vy, axes[3]=vyaw (joyToSportClientCmd)
+        if (std::abs(ax[JOY_AX_LEFT_H]  - VX)   > 1e-4f)
+            FAIL("CS14", "axes[0] (vx) mismatch");
+        if (std::abs(ax[JOY_AX_LEFT_V]  - VY)   > 1e-4f)
+            FAIL("CS14", "axes[1] (vy) mismatch");
+        if (std::abs(ax[JOY_AX_RIGHT_H] - VYAW) > 1e-4f)
+            FAIL("CS14", "axes[2] (vyaw) mismatch");
     }
 
-    PASS("CS14  Joy axes MOVE — axes[0..3] captured correctly; vx/vyaw conversion verified");
+    PASS("CS14  Joy axes MOVE — axes captured; vx/vy/vyaw mapping verified");
     return true;
 }
 
@@ -1234,7 +1299,7 @@ bool testCS17_TwistRequestActive(
 // ════════════════════════════════════════════════════════════════════════════
 //  CS18 — Joy + Twist simultaneous: both outputCbs fire; conversion values
 //         verified for both types
-//         Joy:   vx = axes[0]-axes[1],  vyaw = axes[2]-axes[3]
+//         Joy:   vx = axes[0],  vy = axes[1],  vyaw = axes[3]
 //         Twist: vx = linear.x,  vy = linear.y,  vyaw = angular.z
 // ════════════════════════════════════════════════════════════════════════════
 bool testCS18_JoyTwistConversionValues(
@@ -1263,10 +1328,9 @@ bool testCS18_JoyTwistConversionValues(
     if (!joySrc || !twsSrc) FAIL("CS18", "getSource nullptr");
 
     bool ok;
-    // Joy:   axes[0]=0.6 (fwd), axes[1]=0.1 (bck), axes[2]=0.8 (left), axes[3]=0.3 (right)
-    //   → vx = 0.6-0.1 = 0.5,  vy = 0,  vyaw = 0.8-0.3 = 0.5
-    const float JFW=0.6f, JBK=0.1f, JLF=0.8f, JRT=0.3f;
-    joySrc->send(makeJoyAxes(JFW, JBK, JLF, JRT), ok);
+    // Joy:   axes[0]=0.6 (vx), axes[1]=0.1 (vy), axes[3]=0.8 (vyaw)
+    const float JVX=0.6f, JVY=0.1f, JVYAW=0.8f;
+    joySrc->send(makeJoyAxes(JVX, JVY, JVYAW), ok);
 
     // Twist: linear.x=1.5, linear.y=0.25, angular.z=0.75
     //   → vx=1.5, vy=0.25, vyaw=0.75
@@ -1282,13 +1346,11 @@ bool testCS18_JoyTwistConversionValues(
         const auto& ax = joyTracker.lastOutputMsg.axes;
         if (static_cast<int>(ax.size()) < 4)
             FAIL("CS18", "Joy: fewer than 4 axes captured");
-        if (std::abs(ax[0]-JFW)>1e-4f || std::abs(ax[1]-JBK)>1e-4f ||
-            std::abs(ax[2]-JLF)>1e-4f || std::abs(ax[3]-JRT)>1e-4f)
+        // Direct mapping: axes[0]=vx, axes[1]=vy, axes[3]=vyaw
+        if (std::abs(ax[JOY_AX_LEFT_H]-JVX)>1e-4f ||
+            std::abs(ax[JOY_AX_LEFT_V]-JVY)>1e-4f ||
+            std::abs(ax[JOY_AX_RIGHT_H]-JVYAW)>1e-4f)
             FAIL("CS18", "Joy: captured axes mismatch");
-        if (std::abs((ax[0]-ax[1]) - 0.5f) > 1e-3f)
-            FAIL("CS18", "Joy: vx conversion mismatch (expected 0.5)");
-        if (std::abs((ax[2]-ax[3]) - 0.5f) > 1e-3f)
-            FAIL("CS18", "Joy: vyaw conversion mismatch (expected 0.5)");
     }
 
     // ── Verify Twist outputCb ─────────────────────────────────────────────────
@@ -1448,6 +1510,481 @@ bool testCS20_AutoDisconnectTimeout(
 
 
 // ════════════════════════════════════════════════════════════════════════════
+//  Joy/Twist → unitree_api Request integration helpers
+//
+//  Full output chain under test:
+//    CSM Source → ControlServer routing → msgToOutSignal (joyToSportClientCmd /
+//    Twist dedup) → SportClient → /api/sport/request (unitree_api::msg::Request)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Captures every unitree_api Request published on /api/sport/request.
+struct RequestCapture
+{
+    std::vector<unitree_api::msg::Request> reqs;
+    std::mutex mtx;
+    rclcpp::Subscription<unitree_api::msg::Request>::SharedPtr sub;
+
+    void attach(const rclcpp::Node::SharedPtr& node)
+    {
+        sub = node->create_subscription<unitree_api::msg::Request>(
+            "/api/sport/request", rclcpp::QoS(100),
+            [this](const unitree_api::msg::Request::SharedPtr m)
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                reqs.push_back(*m);
+            });
+    }
+    void clear()
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        reqs.clear();
+    }
+    size_t total()
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        return reqs.size();
+    }
+    size_t countApi(int64_t api_id)
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        size_t n = 0;
+        for (const auto& r : reqs)
+            if (r.header.identity.api_id == api_id) ++n;
+        return n;
+    }
+    /// Returns the parameter JSON of the LAST request with api_id, or null json.
+    nlohmann::json lastParam(int64_t api_id)
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        for (auto it = reqs.rbegin(); it != reqs.rend(); ++it)
+            if (it->header.identity.api_id == api_id)
+            {
+                try { return nlohmann::json::parse(it->parameter); }
+                catch (...) { return nlohmann::json(); }
+            }
+        return nlohmann::json();
+    }
+};
+
+/// TypeConfig<Joy> wired exactly like control_server.cpp: real conversion + SportClient.
+static ControlServer::TypeConfig<Joy> makeSportJoyConfig(SportClient& sc)
+{
+    ControlServer::TypeConfig<Joy> cfg;
+    cfg.isEmergencyStop = joyIsEstop;
+    cfg.isRequestActive = joyIsReqActive;
+    cfg.outputCb = [&sc](const Joy& msg, const msg::ControlSignalInfo& info)
+    {
+        if (auto cmd = msgToOutSignal(info.channel_name, msg)) cmd(sc);
+    };
+    cfg.emergencyStopCb = [&sc](const msg::ControlSignalInfo&) { makeStopSignal()(sc); };
+    return cfg;
+}
+
+static ControlServer::TypeConfig<Twist> makeSportTwistConfig(SportClient& sc)
+{
+    ControlServer::TypeConfig<Twist> cfg;
+    cfg.isEmergencyStop = twistIsEstop;
+    cfg.isRequestActive = twistIsReqActive;
+    cfg.outputCb = [&sc](const Twist& msg, const msg::ControlSignalInfo& info)
+    {
+        if (auto cmd = msgToOutSignal(info.channel_name, msg)) cmd(sc);
+    };
+    cfg.emergencyStopCb = [&sc](const msg::ControlSignalInfo&) { makeStopSignal()(sc); };
+    return cfg;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS21 — Joy buttons A/B/X/Y → StandUp/StandDown/StopMove/RecoveryStand
+//         unitree_api Requests published with correct api_ids
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS21_JoyButtonsToUnitreeRequest(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs21_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs21_source_csm");
+    auto info = makeInfo("cs21/joy", TYPE_JOY, MODE_TOPIC, "cs21_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS21", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs21/joy").get());
+    if (!src) FAIL("CS21", "getSource nullptr");
+
+    bool ok;
+    // Activate the sink with a non-zero Move — must publish one Move request.
+    src->send(makeJoyAxes(0.3f), ok);
+    rclcpp::sleep_for(300ms);
+    if (cs.getActiveSinkChannel<Joy>() != "cs21/joy")
+        FAIL("CS21", "sink not active after initial MOVE message");
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) == 0)
+        FAIL("CS21", "activation Move request not published to /api/sport/request");
+    cap.clear();
+
+    struct Case { uint8_t btn; int32_t api; const char* name; };
+    const Case cases[] = {
+        {JOY_BTN_A, ROBOT_SPORT_API_ID_STANDUP,       "A→StandUp"},
+        {JOY_BTN_B, ROBOT_SPORT_API_ID_STANDDOWN,     "B→StandDown"},
+        {JOY_BTN_X, ROBOT_SPORT_API_ID_STOPMOVE,      "X→StopMove"},
+        {JOY_BTN_Y, ROBOT_SPORT_API_ID_RECOVERYSTAND, "Y→RecoveryStand"},
+    };
+    for (const auto& c : cases)
+    {
+        src->send(makeJoyButton(c.btn), ok);   // press
+        rclcpp::sleep_for(150ms);
+        src->send(makeJoyButton(-1), ok);      // release
+        rclcpp::sleep_for(150ms);
+    }
+
+    for (const auto& c : cases)
+    {
+        const size_t n = cap.countApi(c.api);
+        if (n != 1)
+            FAIL("CS21", (std::string(c.name) + ": expected exactly 1 request, got " +
+                          std::to_string(n)).c_str());
+    }
+    // Exactly one zero-Move after the first release (axes returned 0,0,0);
+    // subsequent identical zero axes must be deduplicated.
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 1)
+        FAIL("CS21", ("expected exactly 1 zero-Move during button sequence, got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_MOVE))).c_str());
+
+    PASS("CS21  Joy buttons A/B/X/Y → StandUp/StandDown/StopMove/RecoveryStand requests");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS22 — PRESS edge: held button fires exactly once; re-press fires again
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS22_ButtonPressEdgeOnce(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs22_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs22_source_csm");
+    auto info = makeInfo("cs22/joy", TYPE_JOY, MODE_TOPIC, "cs22_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS22", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs22/joy").get());
+    if (!src) FAIL("CS22", "getSource nullptr");
+
+    bool ok;
+    // Hold A across 3 consecutive messages → PRESS edge only on the first.
+    for (int i = 0; i < 3; ++i)
+    {
+        src->send(makeJoyButton(JOY_BTN_A), ok);
+        rclcpp::sleep_for(120ms);
+    }
+    if (cap.countApi(ROBOT_SPORT_API_ID_STANDUP) != 1)
+        FAIL("CS22", ("held A: expected exactly 1 StandUp, got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_STANDUP))).c_str());
+
+    // Release, then press again → second PRESS edge → second StandUp.
+    src->send(makeJoyButton(-1), ok);
+    rclcpp::sleep_for(120ms);
+    src->send(makeJoyButton(JOY_BTN_A), ok);
+    rclcpp::sleep_for(200ms);
+
+    if (cap.countApi(ROBOT_SPORT_API_ID_STANDUP) != 2)
+        FAIL("CS22", ("re-press A: expected 2 StandUp total, got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_STANDUP))).c_str());
+
+    PASS("CS22  PRESS edge — held button fired once; re-press fired again");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS23 — Move dedup: identical (vx,vy,vyaw) not re-sent; each change sent once
+//         with correct x/y/z parameters
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS23_MoveDedup(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs23_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs23_source_csm");
+    auto info = makeInfo("cs23/joy", TYPE_JOY, MODE_TOPIC, "cs23_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS23", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs23/joy").get());
+    if (!src) FAIL("CS23", "getSource nullptr");
+
+    bool ok;
+    // Phase 1: identical Move repeated 3× → exactly 1 Move request.
+    const float VX = 0.5f, VY = 0.2f, VYAW = 0.3f;
+    for (int i = 0; i < 3; ++i)
+    {
+        src->send(makeJoyAxes(VX, VY, VYAW), ok);
+        rclcpp::sleep_for(120ms);
+    }
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 1)
+        FAIL("CS23", ("identical axes ×3: expected 1 Move, got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_MOVE))).c_str());
+
+    // Verify the Move parameters (SportClient::Move encodes x/y/z JSON keys).
+    {
+        auto js = cap.lastParam(ROBOT_SPORT_API_ID_MOVE);
+        if (js.is_null()) FAIL("CS23", "Move request parameter missing/unparsable");
+        if (std::abs(js.value("x", 0.0f) - VX)   > 1e-4f ||
+            std::abs(js.value("y", 0.0f) - VY)   > 1e-4f ||
+            std::abs(js.value("z", 0.0f) - VYAW) > 1e-4f)
+            FAIL("CS23", "Move parameter x/y/z mismatch");
+    }
+
+    // Phase 2: change vx → second Move.
+    src->send(makeJoyAxes(0.8f, VY, VYAW), ok);
+    rclcpp::sleep_for(200ms);
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 2)
+        FAIL("CS23", "changed vx: expected 2nd Move request");
+
+    // Phase 3: return to zero → third Move (0,0,0), then repeated zeros deduped.
+    for (int i = 0; i < 3; ++i)
+    {
+        src->send(makeJoyAxes(0.0f, 0.0f, 0.0f), ok);
+        rclcpp::sleep_for(120ms);
+    }
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 3)
+        FAIL("CS23", ("zeros: expected 3 Moves total (one final zero Move), got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_MOVE))).c_str());
+    {
+        auto js = cap.lastParam(ROBOT_SPORT_API_ID_MOVE);
+        if (std::abs(js.value("x", -1.0f)) > 1e-6f ||
+            std::abs(js.value("y", -1.0f)) > 1e-6f ||
+            std::abs(js.value("z", -1.0f)) > 1e-6f)
+            FAIL("CS23", "final Move must be (0,0,0)");
+    }
+
+    PASS("CS23  Move dedup — identical axes suppressed; each change sent exactly once");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS24 — Idle joystick (all zeros) from startup → ZERO unitree requests
+//         while messages keep flowing (sink stays active)
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS24_IdleJoyNoOutput(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs24_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs24_source_csm");
+    auto info = makeInfo("cs24/joy", TYPE_JOY, MODE_TOPIC, "cs24_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS24", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs24/joy").get());
+    if (!src) FAIL("CS24", "getSource nullptr");
+
+    bool ok;
+    // Idle joystick stream: all axes 0, no buttons, 10 messages @ ~10 Hz.
+    for (int i = 0; i < 10; ++i)
+    {
+        src->send(makeJoyAxes(0.0f, 0.0f, 0.0f), ok);
+        rclcpp::sleep_for(100ms);
+    }
+
+    // Messages flowed (sink selected as active)...
+    if (cs.getActiveSinkChannel<Joy>() != "cs24/joy")
+        FAIL("CS24", "sink not active — idle messages did not flow");
+    // ...but not a single unitree request was published.
+    if (cap.total() != 0)
+        FAIL("CS24", ("idle joystick published " + std::to_string(cap.total()) +
+                      " requests; expected 0").c_str());
+
+    PASS("CS24  Idle joystick — messages flow, zero unitree requests published");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS25 — Twist Move dedup: identical Twist not re-sent; change sent once
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS25_TwistMoveDedup(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs25_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportTwistConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs25_source_csm");
+    auto info = makeInfo("cs25/twist", TYPE_TWIST, MODE_TOPIC, "cs25_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS25", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<TwistSource*>(srcCsm.getSource("cs25/twist").get());
+    if (!src) FAIL("CS25", "getSource nullptr");
+
+    bool ok;
+    // Identical Twist ×3 → exactly 1 Move.
+    for (int i = 0; i < 3; ++i)
+    {
+        src->send(makeTwistMove(1.0, 0.5, 0.2), ok);
+        rclcpp::sleep_for(120ms);
+    }
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 1)
+        FAIL("CS25", ("identical Twist ×3: expected 1 Move, got " +
+                      std::to_string(cap.countApi(ROBOT_SPORT_API_ID_MOVE))).c_str());
+    {
+        auto js = cap.lastParam(ROBOT_SPORT_API_ID_MOVE);
+        if (std::abs(js.value("x", 0.0f) - 1.0f) > 1e-4f ||
+            std::abs(js.value("y", 0.0f) - 0.5f) > 1e-4f ||
+            std::abs(js.value("z", 0.0f) - 0.2f) > 1e-4f)
+            FAIL("CS25", "Twist Move parameter x/y/z mismatch");
+    }
+
+    // Changed Twist → second Move.
+    src->send(makeTwistMove(2.0, 0.5, 0.2), ok);
+    rclcpp::sleep_for(200ms);
+    if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != 2)
+        FAIL("CS25", "changed Twist: expected 2nd Move request");
+
+    PASS("CS25  Twist Move dedup — identical Twist suppressed; change sent once");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS26 — Joy e-stop content → StopMove request published on /api/sport/request
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS26_EstopPublishesStopMove(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs26_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs26_source_csm");
+    auto info = makeInfo("cs26/joy", TYPE_JOY, MODE_TOPIC, "cs26_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS26", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs26/joy").get());
+    if (!src) FAIL("CS26", "getSource nullptr");
+
+    bool ok;
+    src->send(makeJoyAxes(0.4f), ok);   // activate
+    rclcpp::sleep_for(200ms);
+    if (cs.getActiveSinkChannel<Joy>() != "cs26/joy")
+        FAIL("CS26", "sink not active");
+    cap.clear();
+
+    src->send(makeJoyEstop(), ok);
+    rclcpp::sleep_for(300ms);
+
+    // emergencyStopCb → makeStopSignal → StopMove. The watchdog may re-fire the
+    // e-stop while no fallback sink exists, so require >= 1 rather than == 1.
+    if (cap.countApi(ROBOT_SPORT_API_ID_STOPMOVE) == 0)
+        FAIL("CS26", "e-stop did not publish a StopMove request");
+
+    PASS("CS26  Joy e-stop — StopMove request published on /api/sport/request");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CS27 — Per-axis Move: vx / vy / vyaw individually and combined (incl.
+//         negative values) map to the correct Move x/y/z parameters;
+//         unused axes (right stick vertical, L2 trigger) produce no output
+// ════════════════════════════════════════════════════════════════════════════
+bool testCS27_PerAxisMove(
+    rclcpp::Node::SharedPtr csNode,
+    rclcpp::Node::SharedPtr srcNode)
+{
+    ControlServer cs(csNode.get(), {"cs27_server", 50'000'000LL});
+    SportClient sport(csNode.get());
+    RequestCapture cap;
+    cap.attach(csNode);
+    cs.registerTypeConfig(makeSportJoyConfig(sport));
+
+    ControlSignalManager srcCsm(srcNode.get(), "cs27_source_csm");
+    auto info = makeInfo("cs27/joy", TYPE_JOY, MODE_TOPIC, "cs27_server");
+    if (!csmRegisterSource(srcCsm, info)) FAIL("CS27", "registerSource failed");
+    rclcpp::sleep_for(300ms);
+
+    auto* src = dynamic_cast<JoySource*>(srcCsm.getSource("cs27/joy").get());
+    if (!src) FAIL("CS27", "getSource nullptr");
+
+    bool ok;
+    struct AxCase { float vx, vy, vyaw; const char* name; };
+    const AxCase cases[] = {
+        {0.5f,  0.0f,  0.0f, "vx only (left H)"},
+        {0.0f,  0.4f,  0.0f, "vy only (left V)"},
+        {0.0f,  0.0f, -0.7f, "vyaw only, negative (right H)"},
+        {0.3f, -0.2f,  0.6f, "combined vx/vy/vyaw"},
+    };
+
+    size_t expectedMoves = 0;
+    for (const auto& c : cases)
+    {
+        src->send(makeJoyAxes(c.vx, c.vy, c.vyaw), ok);
+        rclcpp::sleep_for(200ms);
+        ++expectedMoves;
+
+        if (cap.countApi(ROBOT_SPORT_API_ID_MOVE) != expectedMoves)
+            FAIL("CS27", (std::string(c.name) + ": expected " +
+                          std::to_string(expectedMoves) + " Moves total, got " +
+                          std::to_string(cap.countApi(ROBOT_SPORT_API_ID_MOVE))).c_str());
+
+        auto js = cap.lastParam(ROBOT_SPORT_API_ID_MOVE);
+        if (js.is_null())
+            FAIL("CS27", (std::string(c.name) + ": Move parameter unparsable").c_str());
+        if (std::abs(js.value("x", -99.0f) - c.vx)   > 1e-4f ||
+            std::abs(js.value("y", -99.0f) - c.vy)   > 1e-4f ||
+            std::abs(js.value("z", -99.0f) - c.vyaw) > 1e-4f)
+            FAIL("CS27", (std::string(c.name) + ": Move x/y/z mismatch").c_str());
+    }
+
+    // Unused axes: wiggle right stick vertical and press L2 while the mapped
+    // sticks hold the last values → values unchanged → NO new request.
+    const auto& lastC = cases[3];
+    cap.clear();
+    src->send(makeJoyAxesFull(lastC.vx, lastC.vy, lastC.vyaw,
+                              /*rightV=*/0.9f, /*l2=*/-1.0f), ok);
+    rclcpp::sleep_for(200ms);
+    src->send(makeJoyAxesFull(lastC.vx, lastC.vy, lastC.vyaw,
+                              /*rightV=*/-0.5f, /*l2=*/-1.0f), ok);
+    rclcpp::sleep_for(200ms);
+    if (cap.total() != 0)
+        FAIL("CS27", ("unused axes (right V, L2) produced " +
+                      std::to_string(cap.total()) + " requests; expected 0").c_str());
+
+    PASS("CS27  Per-axis Move — vx/vy/vyaw individual+combined verified; unused axes silent");
+    return true;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
 //  main
 // ════════════════════════════════════════════════════════════════════════════
 int main(int argc, char* argv[])
@@ -1550,6 +2087,22 @@ int main(int argc, char* argv[])
     auto n_cs20   = makeNode("n_cs20_cs");
     auto n_cs20s  = makeNode("n_cs20_src");
 
+    // CS21–CS26 — Joy/Twist → unitree_api Request integration
+    auto n_cs21  = makeNode("n_cs21_cs");
+    auto n_cs21s = makeNode("n_cs21_src");
+    auto n_cs22  = makeNode("n_cs22_cs");
+    auto n_cs22s = makeNode("n_cs22_src");
+    auto n_cs23  = makeNode("n_cs23_cs");
+    auto n_cs23s = makeNode("n_cs23_src");
+    auto n_cs24  = makeNode("n_cs24_cs");
+    auto n_cs24s = makeNode("n_cs24_src");
+    auto n_cs25  = makeNode("n_cs25_cs");
+    auto n_cs25s = makeNode("n_cs25_src");
+    auto n_cs26  = makeNode("n_cs26_cs");
+    auto n_cs26s = makeNode("n_cs26_src");
+    auto n_cs27  = makeNode("n_cs27_cs");
+    auto n_cs27s = makeNode("n_cs27_src");
+
     rclcpp::executors::MultiThreadedExecutor exec;
     for (auto& n : {n_cs1, n_cs1s,
                     n_cs2, n_cs2s,
@@ -1570,7 +2123,14 @@ int main(int argc, char* argv[])
                     n_cs17, n_cs17lo, n_cs17hi,
                     n_cs18, n_cs18s,
                     n_cs19, n_cs19s,
-                    n_cs20, n_cs20s})
+                    n_cs20, n_cs20s,
+                    n_cs21, n_cs21s,
+                    n_cs22, n_cs22s,
+                    n_cs23, n_cs23s,
+                    n_cs24, n_cs24s,
+                    n_cs25, n_cs25s,
+                    n_cs26, n_cs26s,
+                    n_cs27, n_cs27s})
         exec.add_node(n);
 
     std::thread execThread([&exec]() { exec.spin(); });
@@ -1600,6 +2160,13 @@ int main(int argc, char* argv[])
     run(testCS18_JoyTwistConversionValues  (n_cs18, n_cs18s));
     run(testCS19_FallbackToLowFreq         (n_cs19, n_cs19s));
     run(testCS20_AutoDisconnectTimeout     (n_cs20, n_cs20s));
+    run(testCS21_JoyButtonsToUnitreeRequest(n_cs21, n_cs21s));
+    run(testCS22_ButtonPressEdgeOnce       (n_cs22, n_cs22s));
+    run(testCS23_MoveDedup                 (n_cs23, n_cs23s));
+    run(testCS24_IdleJoyNoOutput           (n_cs24, n_cs24s));
+    run(testCS25_TwistMoveDedup            (n_cs25, n_cs25s));
+    run(testCS26_EstopPublishesStopMove    (n_cs26, n_cs26s));
+    run(testCS27_PerAxisMove               (n_cs27, n_cs27s));
 
     RCLCPP_INFO(rclcpp::get_logger("test_cs"),
         "=== Results: %d passed, %d failed ===", passed, failed);

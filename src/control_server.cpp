@@ -51,7 +51,9 @@ public:
         joyCfg.outputCb = [this](const sensor_msgs::msg::Joy& joy,
                                  const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            rv2_interfaces::rv2_server_control::msgToOutSignal(info.channel_name, joy)(sportClient_);
+            // cmd is empty when the message carries no new event (e.g. idle joystick).
+            if (auto cmd = rv2_interfaces::rv2_server_control::msgToOutSignal(info.channel_name, joy))
+                cmd(sportClient_);
         };
 
         joyCfg.emergencyStopCb = [this](const rv2_interfaces::msg::ControlSignalInfo& info)
@@ -69,7 +71,9 @@ public:
         twistCfg.outputCb = [this](const geometry_msgs::msg::Twist& twist,
                                    const rv2_interfaces::msg::ControlSignalInfo& info)
         {
-            rv2_interfaces::rv2_server_control::msgToOutSignal(info.channel_name, twist)(sportClient_);
+            // cmd is empty when the Move values did not change since the last output.
+            if (auto cmd = rv2_interfaces::rv2_server_control::msgToOutSignal(info.channel_name, twist))
+                cmd(sportClient_);
         };
 
         twistCfg.emergencyStopCb = [this](const rv2_interfaces::msg::ControlSignalInfo& info)

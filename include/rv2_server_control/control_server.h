@@ -198,7 +198,8 @@ public:
 
     /**
      * @brief Manually select the active Sink for the given message type by channel_name.
-     * @return false if no Sink with that channel name and matching type is tracked.
+     * @return false if no Sink with that channel name and matching type is tracked,
+     *         or if the Sink has EMERGENCY_STOP priority (reserved, never an output source).
      */
     template<typename msgT>
     bool setActiveSink(const std::string& channelName)
@@ -209,7 +210,16 @@ public:
         if (it == typeStates_.end()) return false;
 
         auto& st = it->second;
-        if (!st.sinkRecords.count(channelName)) return false;
+        auto recIt = st.sinkRecords.find(channelName);
+        if (recIt == st.sinkRecords.end()) return false;
+        if (recIt->second.priority ==
+            msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP)
+        {
+            RCLCPP_WARN(node_->get_logger(),
+                "[ControlServer:%s] Refused manual activation of e-stop-priority sink '%s'",
+                cfg_.name.c_str(), channelName.c_str());
+            return false;
+        }
         st.activeChannel = channelName;
         RCLCPP_INFO(node_->get_logger(),
             "[ControlServer:%s] Active sink for type manually set to '%s'",
@@ -354,6 +364,17 @@ private:
                             static_cast<int>(rec.priority));
                     }
                 }
+            }
+            else if (rec.priority != info.priority)
+            {
+                // Keep the stored priority in sync with the descriptor so that
+                // auto-promote / selection (stored rec.priority) and request-active
+                // (fresh info.priority) always agree on a single source of truth.
+                RCLCPP_INFO(node_->get_logger(),
+                    "[ControlServer:%s] Sink '%s' priority updated %d -> %d",
+                    cfg_.name.c_str(), info.channel_name.c_str(),
+                    static_cast<int>(rec.priority), static_cast<int>(info.priority));
+                rec.priority = info.priority;
             }
         }
 

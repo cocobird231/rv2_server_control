@@ -42,7 +42,7 @@ template <>
 inline bool isRequestActive(const sensor_msgs::msg::Joy & joy)
 {
     if (static_cast<int>(joy.buttons.size()) < 4) return false;
-    return joy.buttons[3] == 1;
+    return joy.buttons[11] == 1;
 }
 
 template <>

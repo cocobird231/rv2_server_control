@@ -1,0 +1,29 @@
+{
+    "axes":[
+        0, //左邊蘑菇頭 左右  untree(move vx) -1~1
+        0, //左邊蘑菇頭 上下 untree(move vy) -1~1
+        1, //L2 -1~1
+        0, //右邊蘑菇頭 左右 untree(move vyaw) -1~1
+        0, //右邊蘑菇頭 上下 -1~1
+        0  //R2 -1~1
+    ],
+    "buttons":[
+        0, // A untree(standup) 0/1
+        0, // B untree(standdown) 0/1
+        0, // X StopMove 0/1
+        0, // Y RecoveryStand 0/1
+        0, // L1 0/1
+        0, // R1 0/1
+        0, // L2 0/1
+        0, // R2 0/1
+        0, // Select 0/1
+        0, // Start 0/1
+        0, //左搖桿按鈕 0/1
+        0, //右搖桿按鈕 0/1
+        0, //上 0/1
+        0, //下0/1
+        0, //左 0/1
+        0, //右 0/1
+        0 // Home (windows已經拿去做系統按鍵) 
+}
+//standup跟RecoveryStand確認 做姿態確認傳輸move到 StopMove或standdown

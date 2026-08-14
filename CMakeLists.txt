@@ -71,9 +71,13 @@ install(TARGETS fake_unitree_api_component fake_unitree_api_node
 )
 
 # ── test_control_server (plain executable) ────────────────────────────────────
-add_executable(test_control_server test/test_control_server.cpp)
+add_executable(test_control_server
+  test/test_control_server.cpp
+  thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp
+)
 target_include_directories(test_control_server PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/unitree_ros2_client>
 )
 ament_target_dependencies(test_control_server
   rclcpp
@@ -82,6 +86,11 @@ ament_target_dependencies(test_control_server
   std_msgs
   rv2_interfaces
   rv2_control_signal_transport
+  unitree_api
+  joy_interpreter
+)
+target_link_libraries(test_control_server
+  joy_interpreter::joy_interpreter_lib
 )
 install(TARGETS test_control_server DESTINATION lib/${PROJECT_NAME})
 
@@ -106,6 +115,13 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  # End-to-end launch test: /joy simulator → topic bridge → ControlServerNode
+  # → /api/sport/request. Needs rv2_csm_topic_bridge and the unitree_api
+  # underlay in the environment.
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_joy_bridge_integration.py
+    TIMEOUT 120)
+
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files

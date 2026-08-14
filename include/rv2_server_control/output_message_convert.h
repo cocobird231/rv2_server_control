@@ -11,8 +11,11 @@
  *
  *  msgToOutSignal(id, msg)  — convert a message to a SportClientCmd.
  *    id  : string channel identifier; used to maintain per-channel state
- *          (e.g. JoyInterpreter FSM, held-button tracking).
+ *          (e.g. JoyInterpreter FSM, last emitted Move values).
  *    msg : incoming ROS 2 message.
+ *    May return an EMPTY SportClientCmd when the message carries no new event
+ *    (e.g. Move values identical to the last emitted Move).  Callers MUST
+ *    check before invoking: `if (auto cmd = msgToOutSignal(...)) cmd(sc);`
  *
  *  makeStopSignal()  — returns a SportClientCmd that issues StopMove.
  *
@@ -23,16 +26,17 @@
  *    for the full axis/button layout and command mapping table.
  *
  *  Twist (geometry_msgs::msg::Twist)
- *    Always returns Move(linear.x, linear.y, angular.z).
- *    id is unused.
+ *    Returns Move(linear.x, linear.y, angular.z) only when the values differ
+ *    from the last emitted Move on this channel id; otherwise returns an
+ *    empty SportClientCmd (no new event).
  *
  * ── Usage ─────────────────────────────────────────────────────────────────────
  *  #include "rv2_server_control/output_message_convert.h"
  *
- *  // In outputCb:
- *  msgToOutSignal(info.channel_name, joy_msg)(sportClient_);
+ *  // In outputCb (cmd may be empty — check before invoking):
+ *  if (auto cmd = msgToOutSignal(info.channel_name, joy_msg)) cmd(sportClient_);
  *
- *  // Emergency stop:
+ *  // Emergency stop (always valid):
  *  makeStopSignal()(sportClient_);
  */
 
@@ -81,10 +85,18 @@ template<>
 inline SportClientCmd msgToOutSignal<geometry_msgs::msg::Twist>(
     const std::string& id, const geometry_msgs::msg::Twist& twist)
 {
-    (void)id;
+    struct LastMove { float vx = 0.0f, vy = 0.0f, vyaw = 0.0f; };
+    static std::map<std::string, LastMove> lastMoves;
+
     const float vx   = static_cast<float>(twist.linear.x);
     const float vy   = static_cast<float>(twist.linear.y);
     const float vyaw = static_cast<float>(twist.angular.z);
+
+    auto& last = lastMoves[id];
+    if (vx == last.vx && vy == last.vy && vyaw == last.vyaw)
+        return {};  // no value change → no new event → no output
+
+    last = {vx, vy, vyaw};
     return [vx, vy, vyaw](SportClient& sc) {
         unitree_api::msg::Request req;
         sc.Move(req, vx, vy, vyaw);
