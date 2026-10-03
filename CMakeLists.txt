@@ -33,10 +33,10 @@ target_link_libraries(control_server_component
   joy_interpreter::joy_interpreter_lib nlohmann_json::nlohmann_json)
 rclcpp_components_register_node(control_server_component
   PLUGIN "ControlServerNode" EXECUTABLE control_server)
-install(TARGETS control_server_component control_server
+install(TARGETS control_server_component
   EXPORT export_${PROJECT_NAME}
-  ARCHIVE DESTINATION lib LIBRARY DESTINATION lib
-  RUNTIME DESTINATION lib/${PROJECT_NAME})
+  ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(TARGETS control_server RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 add_library(fake_unitree_api_component SHARED test/fake_unitree_api_node.cpp)
 ament_target_dependencies(fake_unitree_api_component rclcpp rclcpp_components unitree_api)
