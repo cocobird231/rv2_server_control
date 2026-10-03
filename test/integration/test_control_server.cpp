@@ -11,6 +11,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "rv2_server_control/control_server.h"
+#include "rv2_server_control/output_message_convert.h"
 
 using namespace std::chrono_literals;
 namespace transport = rv2_interfaces::r1;
@@ -52,10 +53,8 @@ protected:
         prefix_ = "server_case_" + std::to_string(++serial);
         sinkNode_ = std::make_shared<rclcpp::Node>(prefix_ + "_sink");
         sourceNode_ = std::make_shared<rclcpp::Node>(prefix_ + "_source");
-        Server::Config config;
+        auto config = serverConfig();
         config.name = prefix_;
-        config.watchdogIntervalNs = 20'000'000;
-        config.managerOptions.statusIntervalMs = 20;
         server_ = std::make_unique<Server>(sinkNode_.get(), config);
         transport::ManagerOptions options(transport::RetryPolicy(20, 100, 0, 20, 4));
         options.statusIntervalMs = 20;
@@ -79,6 +78,14 @@ protected:
             {
                 executor_->spin();
             });
+    }
+
+    virtual Server::Config serverConfig() const
+    {
+        Server::Config config;
+        config.watchdogIntervalNs = 20'000'000;
+        config.managerOptions.statusIntervalMs = 20;
+        return config;
     }
 
     void TearDown() override
@@ -260,21 +267,125 @@ TEST_F(ServerIntegration, ActiveTimeoutFallsBackThenStopsOnlyOnce)
     EXPECT_FALSE(server_->setActiveSink<Joy>(channel("active")));
 }
 
-TEST_F(ServerIntegration, OneServicePacketArmsLossEdgeBeforeStateTick)
+class FirstPacketServer : public ServerIntegration
 {
-    auto source = add("single", 50, 100, 0, "joy", "service");
-    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    Server::Config serverConfig() const override
+    {
+        auto config = ServerIntegration::serverConfig();
+        config.managerOptions.statusIntervalMs = 200;
+        return config;
+    }
+};
+
+TEST_F(FirstPacketServer, OneServicePacketArmsLossEdgeBeforeStateTick)
+{
+    auto stateAtReceive = std::make_shared<std::atomic<int>>(-1);
+    Server::TypeConfig<Joy> config;
+    config.outputCb = [this, stateAtReceive](const Joy&, const transport::ControlSignalInfo& info)
+    {
+        const auto state = server_->csm().getSinkState(info.controller_name);
+        stateAtReceive->store(state ? static_cast<int>(*state) : -1);
+    };
+    config.emergencyStopCb = [this](const transport::ControlSignalInfo&)
+    {
+        ++stops_;
+    };
+    server_->registerTypeConfig(std::move(config));
+    // Synchronize with an observed status tick, leaving the next 200ms window
+    // for registration and the single packet's 50ms safety deadline.
+    auto ticks = std::make_shared<std::atomic<int>>(0);
+    auto status = sourceNode_->create_subscription<r1_interfaces::msg::ManagerStatus>(
+        prefix_ + "/status",
+        10,
+        [ticks](r1_interfaces::msg::ManagerStatus::ConstSharedPtr)
+        {
+            ++*ticks;
+        });
     ASSERT_TRUE(waitFor(
         [&]
         {
-            return count("single") == 1;
+            return ticks->load() > 0;
         }));
+    auto source = add("single", 50, 50, 0, "joy", "service");
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(stateAtReceive->load(), static_cast<int>(transport::ControlSignalState::INITIAL));
     ASSERT_TRUE(waitFor(
         [&]
         {
             return stops_ == 1;
-        }));
+        },
+        150ms));
     std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(stops_, 1);
+}
+
+class SlowWatchdogServer : public ServerIntegration
+{
+    Server::Config serverConfig() const override
+    {
+        auto config = ServerIntegration::serverConfig();
+        config.watchdogIntervalNs = 5'000'000'000;
+        return config;
+    }
+};
+
+TEST_F(SlowWatchdogServer, SameChannelRebuildResetsDedupBeforeWatchdog)
+{
+    const auto start = std::chrono::steady_clock::now();
+    auto converter = std::make_shared<rv2_interfaces::rv2_server_control::OutputMessageConverter>();
+    auto converted = std::make_shared<std::atomic<int>>(0);
+    auto changes = std::make_shared<std::atomic<int>>(0);
+    Server::TypeConfig<Joy> config;
+    config.outputCb = [converter, converted](const Joy& message, const transport::ControlSignalInfo& info)
+    {
+        if (converter->convert(info.channel_name, message))
+            ++*converted;
+    };
+    config.emergencyStopCb = [this, converter](const transport::ControlSignalInfo&)
+    {
+        ++stops_;
+        converter->reset();
+    };
+    config.activeChangedCb = [converter, changes](const std::string&)
+    {
+        converter->reset();
+        ++*changes;
+    };
+    server_->registerTypeConfig(std::move(config));
+    auto source = add("same", 50, 150, 500);
+    ASSERT_TRUE(sendUntil(source,
+                          joy(),
+                          [&]
+                          {
+                              return converted->load() == 1;
+                          }));
+    const auto oldSink = server_->csm().getSink(source.controllerName());
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return !oldSink.valid();
+        },
+        2000ms));
+    ASSERT_EQ(stops_, 0);  // the 5s watchdog has not cleared the old record
+    ASSERT_EQ(changes->load(), 1);
+    if (source.valid())
+    {
+        EXPECT_TRUE(sources_->unregisterSource(source));
+    }
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return !sources_->getSource(source.controllerName()).valid();
+        }));
+    auto replacement = add("same", 50, 150, 500);
+    ASSERT_TRUE(sendUntil(replacement,
+                          joy(),
+                          [&]
+                          {
+                              return converted->load() == 2;
+                          }));
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 4s);
+    EXPECT_EQ(changes->load(), 2);
     EXPECT_EQ(stops_, 1);
 }
 
@@ -408,12 +519,27 @@ TEST_F(ServerIntegration, TwistServiceSentinelAndManualSelection)
 
 TEST_F(ServerIntegration, DestructorFencesAnInFlightUserCallback)
 {
-    std::atomic<bool> entered{false}, release{false}, destroyed{false};
-    Server::TypeConfig<Joy> config;
-    config.outputCb = [&](const Joy&, const transport::ControlSignalInfo&)
+    struct Gate
     {
-        entered = true;
-        while (!release.load())
+        std::atomic<bool> entered{false}, release{false}, destroyed{false};
+    };
+    struct ReleaseGuard
+    {
+        std::shared_ptr<Gate> gate = std::make_shared<Gate>();
+        std::thread destroy;
+        ~ReleaseGuard()
+        {
+            gate->release = true;
+            if (destroy.joinable())
+                destroy.join();
+        }
+    } guard;
+    const auto gate = guard.gate;
+    Server::TypeConfig<Joy> config;
+    config.outputCb = [gate](const Joy&, const transport::ControlSignalInfo&)
+    {
+        gate->entered = true;
+        while (!gate->release.load())
             std::this_thread::yield();
     };
     server_->registerTypeConfig(std::move(config));
@@ -422,18 +548,18 @@ TEST_F(ServerIntegration, DestructorFencesAnInFlightUserCallback)
                           joy(),
                           [&]
                           {
-                              return entered.load();
+                              return gate->entered.load();
                           }));
-    std::thread destroy(
-        [&]
+    guard.destroy = std::thread(
+        [&, gate]
         {
             server_.reset();
-            destroyed = true;
+            gate->destroyed = true;
         });
     std::this_thread::sleep_for(50ms);
-    EXPECT_FALSE(destroyed);
-    release = true;
-    destroy.join();
-    EXPECT_TRUE(destroyed);
+    EXPECT_FALSE(gate->destroyed);
+    gate->release = true;
+    guard.destroy.join();
+    EXPECT_TRUE(gate->destroyed);
 }
 }  // namespace
