@@ -1,6 +1,5 @@
 """Start the R1 control server and one master, respecting deployment YAML."""
 
-import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
@@ -8,13 +7,14 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+from yaml import safe_load
 
 
 def _nodes(context):
     """Resolve optional overrides without replacing values from the YAML file."""
     config_file = LaunchConfiguration("config_file").perform(context)
     with open(config_file, encoding="utf-8") as stream:
-        config = yaml.safe_load(stream) or {}
+        config = safe_load(stream) or {}
     parameters = {}
     for key in ("/**", "control_server"):
         parameters.update(config.get(key, {}).get("ros__parameters", {}))
