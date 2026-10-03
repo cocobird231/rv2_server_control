@@ -222,7 +222,6 @@ class TestJoyPipeline(unittest.TestCase):
 
         # Kill a real bridge process; launch respawns a new manager incarnation.
         before_instance = self.incarnation("r1_bridge_test")
-        before_move = self.count(MOVE)
         os.kill(proc_info[bridge].pid, signal.SIGKILL)
         self.assertTrue(
             self.wait_for(
@@ -231,15 +230,22 @@ class TestJoyPipeline(unittest.TestCase):
                 )
             )
         )
+        before_move = self.count(MOVE)
+        axes[0] = 0.61
+        self.update(axes=axes)
         self.assertTrue(
-            self.wait_for(lambda: self.count(MOVE) > before_move),
-            "bridge restart did not recover",
+            self.wait_for(
+                lambda: (
+                    self.count(MOVE) > before_move
+                    and abs(self.latest_move().get("x", 0) - 0.61) < 0.001
+                )
+            ),
+            "bridge restart did not deliver the new marker",
         )
 
         # Target restart requires the real master to reconcile the still-live
         # source. Compare incarnation and actual output, never only process logs.
         before_instance = self.incarnation("r1_server_test")
-        before_move = self.count(MOVE)
         os.kill(proc_info[server].pid, signal.SIGKILL)
         self.assertTrue(
             self.wait_for(
@@ -248,9 +254,17 @@ class TestJoyPipeline(unittest.TestCase):
                 )
             )
         )
+        before_move = self.count(MOVE)
+        axes[0] = 0.72
+        self.update(axes=axes)
         self.assertTrue(
-            self.wait_for(lambda: self.count(MOVE) > before_move),
-            "server restart did not recover",
+            self.wait_for(
+                lambda: (
+                    self.count(MOVE) > before_move
+                    and abs(self.latest_move().get("x", 0) - 0.72) < 0.001
+                )
+            ),
+            "server restart did not deliver the new marker",
         )
 
 
@@ -259,9 +273,9 @@ class TestProcessExit(unittest.TestCase):
     """Check the final managed processes exit, including intentional crash tests."""
 
     def test_exit_codes(self, proc_info, master, server, bridge):
-        """Only the two explicitly killed peers may report SIGKILL."""
+        """Require clean final exits; proc_info tracks each respawned process."""
         launch_testing.asserts.assertExitCodes(proc_info, process=master)
         for process in (server, bridge):
             launch_testing.asserts.assertExitCodes(
-                proc_info, process=process, allowable_exit_codes=[0, -9]
+                proc_info, process=process, allowable_exit_codes=[0]
             )
