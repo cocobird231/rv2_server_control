@@ -80,31 +80,30 @@ using SportClientCmd = std::function<void(SportClient&)>;
 //  Axis / button index constants
 // ══════════════════════════════════════════════════════════════════════════════
 
-constexpr uint8_t JOY_AX_LEFT_H  = 0;   ///< Left joy horizontal  → Move vx   [-1.0 ~ +1.0]
-constexpr uint8_t JOY_AX_LEFT_V  = 1;   ///< Left joy vertical    → Move vy   [-1.0 ~ +1.0]
-constexpr uint8_t JOY_AX_L2      = 2;   ///< L2 trigger           (unused)    [released=+1.0]
-constexpr uint8_t JOY_AX_RIGHT_H = 3;   ///< Right joy horizontal → Move vyaw [-1.0 ~ +1.0]
-constexpr uint8_t JOY_AX_RIGHT_V = 4;   ///< Right joy vertical   (unused)    [-1.0 ~ +1.0]
-constexpr uint8_t JOY_AX_R2      = 5;   ///< R2 trigger           (e-stop)    [released=+1.0]
+constexpr uint8_t JOY_AX_LEFT_H = 0;  ///< Left joy horizontal  → Move vx   [-1.0 ~ +1.0]
+constexpr uint8_t JOY_AX_LEFT_V = 1;  ///< Left joy vertical    → Move vy   [-1.0 ~ +1.0]
+constexpr uint8_t JOY_AX_L2 = 2;  ///< L2 trigger           (unused)    [released=+1.0]
+constexpr uint8_t JOY_AX_RIGHT_H = 3;  ///< Right joy horizontal → Move vyaw [-1.0 ~ +1.0]
+constexpr uint8_t JOY_AX_RIGHT_V = 4;  ///< Right joy vertical   (unused)    [-1.0 ~ +1.0]
+constexpr uint8_t JOY_AX_R2 = 5;  ///< R2 trigger           (e-stop)    [released=+1.0]
 
-constexpr uint8_t JOY_BTN_A         =  0;  ///< StandUp
-constexpr uint8_t JOY_BTN_B         =  1;  ///< StandDown
-constexpr uint8_t JOY_BTN_X         =  2;  ///< StopMove
-constexpr uint8_t JOY_BTN_Y         =  3;  ///< RecoveryStand
-constexpr uint8_t JOY_BTN_L1        =  4;
-constexpr uint8_t JOY_BTN_R1        =  5;
-constexpr uint8_t JOY_BTN_L2        =  6;
-constexpr uint8_t JOY_BTN_R2        =  7;
-constexpr uint8_t JOY_BTN_SELECT    =  8;
-constexpr uint8_t JOY_BTN_START     =  9;
-constexpr uint8_t JOY_BTN_LEFT_JOY  = 10;
+constexpr uint8_t JOY_BTN_A = 0;  ///< StandUp
+constexpr uint8_t JOY_BTN_B = 1;  ///< StandDown
+constexpr uint8_t JOY_BTN_X = 2;  ///< StopMove
+constexpr uint8_t JOY_BTN_Y = 3;  ///< RecoveryStand
+constexpr uint8_t JOY_BTN_L1 = 4;
+constexpr uint8_t JOY_BTN_R1 = 5;
+constexpr uint8_t JOY_BTN_L2 = 6;
+constexpr uint8_t JOY_BTN_R2 = 7;
+constexpr uint8_t JOY_BTN_SELECT = 8;
+constexpr uint8_t JOY_BTN_START = 9;
+constexpr uint8_t JOY_BTN_LEFT_JOY = 10;
 constexpr uint8_t JOY_BTN_RIGHT_JOY = 11;
-constexpr uint8_t JOY_BTN_PAD_UP    = 12;
-constexpr uint8_t JOY_BTN_PAD_DOWN  = 13;
-constexpr uint8_t JOY_BTN_PAD_LEFT  = 14;
+constexpr uint8_t JOY_BTN_PAD_UP = 12;
+constexpr uint8_t JOY_BTN_PAD_DOWN = 13;
+constexpr uint8_t JOY_BTN_PAD_LEFT = 14;
 constexpr uint8_t JOY_BTN_PAD_RIGHT = 15;
-constexpr uint8_t JOY_BTN_HOME      = 16;
-
+constexpr uint8_t JOY_BTN_HOME = 16;
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Per-channel state
@@ -124,11 +123,10 @@ struct JoyChannelState
 {
     joy_interpreter::JoyInterpreter interpreter;
 
-    float last_vx   = 0.0f;   ///< vx of the last emitted Move
-    float last_vy   = 0.0f;   ///< vy of the last emitted Move
-    float last_vyaw = 0.0f;   ///< vyaw of the last emitted Move
+    float last_vx = 0.0f;  ///< vx of the last emitted Move
+    float last_vy = 0.0f;  ///< vy of the last emitted Move
+    float last_vyaw = 0.0f;  ///< vyaw of the last emitted Move
 };
-
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Joy → SportClient translation
@@ -146,8 +144,7 @@ struct JoyChannelState
  * Otherwise returns an EMPTY SportClientCmd — callers MUST check it
  * (`if (cmd) cmd(sc);`) before invoking.
  */
-inline SportClientCmd joyToSportClientCmd(
-    JoyChannelState& st, const sensor_msgs::msg::Joy& joy)
+inline SportClientCmd joyToSportClientCmd(JoyChannelState& st, const sensor_msgs::msg::Joy& joy)
 {
     using Event = joy_interpreter::msg::JoyActionEvent;
 
@@ -155,46 +152,54 @@ inline SportClientCmd joyToSportClientCmd(
     const auto& ax = joy.axes;
     const auto action = st.interpreter.update(joy, now);
 
-    for (const auto& ev : action.events) {
-        if (ev.action_type != Event::PRESS) continue;
-        switch (ev.button_index) {
-            case JOY_BTN_A:
-                return [](SportClient& sc) {
-                    unitree_api::msg::Request req;
-                    sc.StandUp(req);
-                };
-            case JOY_BTN_B:
-                return [](SportClient& sc) {
-                    unitree_api::msg::Request req;
-                    sc.StandDown(req);
-                };
-            case JOY_BTN_X:
-                return [](SportClient& sc) {
-                    unitree_api::msg::Request req;
-                    sc.StopMove(req);
-                };
-            case JOY_BTN_Y:
-                return [](SportClient& sc) {
-                    unitree_api::msg::Request req;
-                    sc.RecoveryStand(req);
-                };
-            default:
-                break;
+    for (const auto& ev : action.events)
+    {
+        if (ev.action_type != Event::PRESS)
+            continue;
+        switch (ev.button_index)
+        {
+        case JOY_BTN_A:
+            return [](SportClient& sc)
+            {
+                unitree_api::msg::Request req;
+                sc.StandUp(req);
+            };
+        case JOY_BTN_B:
+            return [](SportClient& sc)
+            {
+                unitree_api::msg::Request req;
+                sc.StandDown(req);
+            };
+        case JOY_BTN_X:
+            return [](SportClient& sc)
+            {
+                unitree_api::msg::Request req;
+                sc.StopMove(req);
+            };
+        case JOY_BTN_Y:
+            return [](SportClient& sc)
+            {
+                unitree_api::msg::Request req;
+                sc.RecoveryStand(req);
+            };
+        default:
+            break;
         }
     }
 
     // Move — emitted only when values changed since the last emitted Move.
-    const float vx   = (ax.size() > JOY_AX_LEFT_H)  ?  ax[JOY_AX_LEFT_H]  : 0.0f;
-    const float vy   = (ax.size() > JOY_AX_LEFT_V)  ?  ax[JOY_AX_LEFT_V]  : 0.0f;
-    const float vyaw = (ax.size() > JOY_AX_RIGHT_H) ?  ax[JOY_AX_RIGHT_H] : 0.0f;
+    const float vx = (ax.size() > JOY_AX_LEFT_H) ? ax[JOY_AX_LEFT_H] : 0.0f;
+    const float vy = (ax.size() > JOY_AX_LEFT_V) ? ax[JOY_AX_LEFT_V] : 0.0f;
+    const float vyaw = (ax.size() > JOY_AX_RIGHT_H) ? ax[JOY_AX_RIGHT_H] : 0.0f;
 
     if (vx == st.last_vx && vy == st.last_vy && vyaw == st.last_vyaw)
         return {};  // no value change → no event → no output
 
-    st.last_vx   = vx;
-    st.last_vy   = vy;
+    st.last_vx = vx;
+    st.last_vy = vy;
     st.last_vyaw = vyaw;
-    return [vx, vy, vyaw](SportClient& sc) {
+    return [vx, vy, vyaw](SportClient& sc)
+    {
         unitree_api::msg::Request req;
         sc.Move(req, vx, vy, vyaw);
     };
