@@ -7,13 +7,13 @@ import threading
 import time
 import unittest
 
-import launch
-import launch_testing
-import launch_testing.actions
-import launch_testing.asserts
-import rclpy
+from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_testing import post_shutdown_test
+from launch_testing.actions import ReadyToTest
+from launch_testing.asserts import assertExitCodes
 from r1_interfaces.msg import ManagerStatus
+from rclpy import create_node, init, shutdown
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Joy
@@ -61,9 +61,11 @@ def generate_test_description():
         respawn=True,
         respawn_delay=0.2,
     )
-    return launch.LaunchDescription(
-        [bridge, master, server, launch_testing.actions.ReadyToTest()]
-    ), {"bridge": bridge, "server": server, "master": master}
+    return LaunchDescription([bridge, master, server, ReadyToTest()]), {
+        "bridge": bridge,
+        "server": server,
+        "master": master,
+    }
 
 
 class TestJoyPipeline(unittest.TestCase):
@@ -72,8 +74,8 @@ class TestJoyPipeline(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Create an independent best-effort joy publisher and output recorder."""
-        rclpy.init()
-        cls.node = rclpy.create_node("r1_joy_pipeline_probe")
+        init()
+        cls.node = create_node("r1_joy_pipeline_probe")
         cls.lock = threading.Lock()
         cls.axes = list(IDLE_AXES)
         cls.axes[0] = 0.2
@@ -103,7 +105,7 @@ class TestJoyPipeline(unittest.TestCase):
         cls.executor.shutdown()
         cls.thread.join()
         cls.node.destroy_node()
-        rclpy.shutdown()
+        shutdown()
 
     @classmethod
     def publish_joy(cls):
@@ -268,14 +270,12 @@ class TestJoyPipeline(unittest.TestCase):
         )
 
 
-@launch_testing.post_shutdown_test()
+@post_shutdown_test()
 class TestProcessExit(unittest.TestCase):
     """Check the final managed processes exit, including intentional crash tests."""
 
     def test_exit_codes(self, proc_info, master, server, bridge):
         """Require clean final exits; proc_info tracks each respawned process."""
-        launch_testing.asserts.assertExitCodes(proc_info, process=master)
+        assertExitCodes(proc_info, process=master)
         for process in (server, bridge):
-            launch_testing.asserts.assertExitCodes(
-                proc_info, process=process, allowable_exit_codes=[0]
-            )
+            assertExitCodes(proc_info, process=process, allowable_exit_codes=[0])
