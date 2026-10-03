@@ -3,7 +3,7 @@
 <package format="3">
   <name>rv2_server_control</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>R1 control signal arbitration and Unitree Joy/Twist sport output.</description>
   <maintainer email="cocobird231@gmail.com">coco</maintainer>
   <license>TODO: License declaration</license>
 
@@ -14,18 +14,26 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>rv2_interfaces</depend>
+  <depend>r1_interfaces</depend>
+  <depend>nlohmann-json-dev</depend>
   <depend>rv2_control_signal_transport</depend>
   <depend>joy_interpreter</depend>
   <depend>unitree_api</depend>
 
+  <!-- The upstream unitree_api CMake requires this undeclared dependency. -->
+  <test_depend>rosidl_generator_dds_idl</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>launch</test_depend>
+  <test_depend>launch_ros</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
   <test_depend>rclpy</test_depend>
   <test_depend>rv2_csm_topic_bridge</test_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

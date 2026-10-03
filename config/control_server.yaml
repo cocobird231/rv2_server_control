@@ -1,5 +1,9 @@
 control_server:
   ros__parameters:
     server_name: control_server
-    watchdog_interval_ms: 100        # safety watchdog poll period (ms); output is event-triggered
-    status_timer_interval_ms: 1000   # CSM status/disconnect timer period (ms)
+    master_name: csm_master
+    watchdog_interval_ms: 50
+    status_timer_interval_ms: 100
+    csm_timeout_ms: 600
+    csm_disconnect_timeout_ms: 6000
+    log_output: true

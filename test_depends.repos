@@ -1,0 +1,16 @@
+repositories:
+  r1_interfaces:
+    type: local
+    path: ../r1_interfaces
+  rv2_control_signal_transport:
+    type: local
+    path: ../rv2_control_signal_transport
+  joy_interpreter:
+    type: local
+    path: ../joy_interpreter
+  unitree_api:
+    type: local
+    path: ../unitree_api
+  rv2_csm_topic_bridge:
+    type: local
+    path: ../rv2_csm_topic_bridge

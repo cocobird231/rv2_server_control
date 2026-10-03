@@ -1,538 +1,294 @@
-/**
- * ControlServer — receives control signals from multiple remote Sources (via Sinks
- * managed by an internal ControlSignalManager) and drives one or more motion outputs.
- *
- * Design overview
- * ───────────────
- * ControlServer owns a ControlSignalManager (CSM) internally.  Remote Source CSMs
- * call the hosted `<name>/control_signal_reg` service; the internal CSM creates
- * matching typed Sinks automatically.  Users register per-message-type behaviour
- * via TypeConfig<msgT>, which describes:
- *
- *   - isEmergencyStop  : predicate detecting an e-stop command in a message.
- *   - isRequestActive  : predicate detecting a "request to become active" command.
- *   - outputCb         : called (event-triggered) on every message received from the
- *                        active Sink — not on a fixed timer.
- *   - emergencyStopCb  : called on e-stop or when the active Sink loses signal and no
- *                        usable Sink remains.
- *
- * Multiple message types (Joy, Twist, String …) can be active simultaneously.
- * Each type maintains its own active-sink selection independently.
- *
- * Usage example
- * ─────────────
- *   ControlServer cs(node, {"my_server", 100'000'000LL});
- *
- *   ControlServer::TypeConfig<Joy> joyCfg;
- *   joyCfg.isEmergencyStop = [](const Joy& j){ ... };
- *   joyCfg.isRequestActive = [](const Joy& j){ ... };
- *   joyCfg.outputCb        = [](const Joy& j, const ControlSignalInfo& i){ ... };
- *   joyCfg.emergencyStopCb = [](const ControlSignalInfo& i){ ... };
- *   cs.registerTypeConfig(std::move(joyCfg));
+/** @file control_server.h
+ * @brief R1 sink arbitration and event-driven control output.
  */
-
 #pragma once
 
-#include "control_signal_detect.h"
-
-#include <rv2_control_signal_transport/control_signal_manager.h>
-
-#include <map>
-#include <mutex>
-#include <string>
-#include <functional>
-#include <memory>
-#include <typeindex>
 #include <chrono>
-#include <vector>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <typeindex>
+
+#include <rv2_control_signal_transport/r1/control_signal_manager.h>
+
+#include "control_signal_detect.h"
 
 namespace rv2_interfaces::rv2_server_control
 {
 
+using ControlSignalInfo = r1::ControlSignalInfo;
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  ControlServer
-// ══════════════════════════════════════════════════════════════════════════════
-
+/**
+ * One independent active source per message type. First usable source wins;
+ * a healthy source keeps ownership until a strictly higher-priority request,
+ * explicit selection, emergency stop, or loss of signal. All priorities 1..100
+ * have the same meaning; transport reserves no emergency-stop priority.
+ *
+ * User callbacks run serially, including watchdog callbacks, and must be short
+ * and nonblocking. Queries may be called from callbacks. Stop the executor
+ * before destroying its parent node; this object's destructor fences callbacks.
+ */
 class ControlServer
 {
 public:
-    // ── Top-level configuration ───────────────────────────────────────────────
-
     struct Config
     {
-        /** Unique name prefix for hosted service names (e.g. "control_server"). */
-        std::string name;
-
-        /**
-         * Safety-watchdog poll period in nanoseconds.
-         * Output itself is event-triggered (outputCb fires on each message from the
-         * active Sink). This timer only enforces safety: it re-selects a fallback
-         * Sink when the active one stops being usable and fires emergencyStopCb once
-         * when no usable Sink remains.
-         */
-        int64_t watchdogIntervalNs = 100'000'000LL;  // 100 ms
-
-        /**
-         * Period of the CSM low-frequency status / disconnect timer in milliseconds.
-         * This timer checks Source/Sink states and removes entries that have
-         * been continuously in TIMEOUT for longer than their disconnect_timeout_ns.
-         */
-        int64_t statusTimerIntervalMs = 1000;  // 1 s
+        std::string name = "control_server";
+        int64_t watchdogIntervalNs = 50'000'000;
+        r1::ManagerOptions managerOptions{r1::RetryPolicy::Recommended()};
     };
 
-    // ── Per-message-type configuration ───────────────────────────────────────
-
-    /**
-     * @brief Per-type behaviour configuration for ControlServer.
-     *
-     * Instantiate one TypeConfig<msgT> per message type you want ControlServer
-     * to handle, then pass it to registerTypeConfig().
-     *
-     * @tparam msgT  ROS 2 message type (sensor_msgs::msg::Joy, geometry_msgs::msg::Twist …)
-     */
-    template<typename msgT>
-    struct TypeConfig
+    template <typename MsgT> struct TypeConfig
     {
-        /**
-         * Returns true if msg represents an emergency-stop command.
-         * nullptr = e-stop detection via message content is disabled for this type.
-         */
-        std::function<bool(const msgT&)> isEmergencyStop;
-
-        /**
-         * Returns true if msg represents a "request to become active" command.
-         * nullptr = request-active detection is disabled for this type.
-         */
-        std::function<bool(const msgT&)> isRequestActive;
-
-        /**
-         * Called (event-triggered) on every message received from the active Sink,
-         * with that message and the Sink's ControlSignalInfo.
-         * Not called when the message is classified as e-stop or request-active,
-         * nor for messages arriving from a non-active Sink.
-         */
-        std::function<void(const msgT&, const msg::ControlSignalInfo&)> outputCb;
-
-        /**
-         * Called when an e-stop is detected or when no ACTIVE Sink is available.
-         * The info argument identifies the triggering Sink, or is default-constructed
-         * if no Sink was active.
-         */
-        std::function<void(const msg::ControlSignalInfo&)> emergencyStopCb;
-
-        TypeConfig()
-        {
-            isEmergencyStop = rv2_interfaces::rv2_server_control::isEmergencyStop<msgT>;
-            isRequestActive = rv2_interfaces::rv2_server_control::isRequestActive<msgT>;
-        }
+        std::function<bool(const MsgT&)> isEmergencyStop = rv2_interfaces::rv2_server_control::isEmergencyStop<MsgT>;
+        std::function<bool(const MsgT&)> isRequestActive = rv2_interfaces::rv2_server_control::isRequestActive<MsgT>;
+        std::function<void(const MsgT&, const ControlSignalInfo&)> outputCb;
+        std::function<void(const ControlSignalInfo&)> emergencyStopCb;
+        /// A new owner needs fresh output conversion state, even at equal values.
+        std::function<void(const std::string&)> activeChangedCb;
     };
 
-    // ── Constructor ───────────────────────────────────────────────────────────
-
-    /**
-     * @param node  Parent ROS 2 node (must outlive this object and be spinning).
-     * @param cfg   Server configuration.
-     */
-    ControlServer(rclcpp::Node* node, Config cfg)
-        : node_(node)
-        , cfg_(std::move(cfg))
-        , csm_(node, cfg_.name, cfg_.statusTimerIntervalMs)
+    ControlServer(rclcpp::Node* node, const Config& cfg) :
+        core_(std::make_shared<Core>(node->get_logger()))
     {
-        watchdogTimer_ = node_->create_wall_timer(
-            std::chrono::nanoseconds(cfg_.watchdogIntervalNs),
-            [this]() { _watchdogTimerCb(); });
-
-        RCLCPP_INFO(node_->get_logger(),
-            "[ControlServer:%s] Started. Services: '%s/control_signal_reg', "
-            "'%s/control_signal_info_req'",
-            cfg_.name.c_str(), cfg_.name.c_str(), cfg_.name.c_str());
+        if (cfg.name.empty() || cfg.watchdogIntervalNs <= 0)
+            throw std::invalid_argument("server name and positive watchdog interval are required");
+        manager_ = std::make_unique<r1::ControlSignalManager>(node, cfg.name, cfg.managerOptions);
+        core_->manager = manager_.get();
+        timer_ = node->create_wall_timer(std::chrono::nanoseconds(cfg.watchdogIntervalNs),
+                                         [core = core_]
+                                         {
+                                             std::lock_guard<std::recursive_mutex> lock(core->mutex);
+                                             if (core->stopping)
+                                                 return;
+                                             for (auto& [type, state] : core->types)
+                                                 watch(*core, type, state);
+                                         });
     }
 
-    ControlServer(const ControlServer&)            = delete;
+    ~ControlServer()
+    {
+        timer_->cancel();
+        // Copied ROS callbacks hold Core, never this. The lock waits for any
+        // callback already dispatching, then prevents all further user output.
+        std::lock_guard<std::recursive_mutex> lock(core_->mutex);
+        core_->stopping = true;
+        core_->manager = nullptr;
+    }
+
+    ControlServer(const ControlServer&) = delete;
     ControlServer& operator=(const ControlServer&) = delete;
 
-    // ── Type registration ─────────────────────────────────────────────────────
-
-    /**
-     * @brief Register per-type behaviour and activate Sink management for msgT.
-     *
-     * This must be called before remote Sources of type msgT connect.
-     * It registers a CSM sink-message callback so that each newly received message
-     * immediately drives the active-sink selection logic for the type.
-     *
-     * Replaces any previously registered TypeConfig for this msgT.
-     *
-     * @tparam msgT  ROS 2 message type.
-     * @param  tcfg  Per-type configuration.
-     */
-    template<typename msgT>
-    void registerTypeConfig(TypeConfig<msgT> tcfg)
+    template <typename MsgT> void registerTypeConfig(TypeConfig<MsgT> config)
     {
-        const std::type_index tid     = typeid(msgT);
-        const std::string     typeStr = ControlSignalManager::typeKeyFor<msgT>();
-
-        // Initialise per-type runtime state.
-        {
-            std::lock_guard<std::mutex> lk(typeMtx_);
-            typeStates_.emplace(tid, TypeState{});
-        }
-
-        // Register the CSM sink-message callback.  Fires on every received message
-        // from any Sink of this type.
-        csm_.setSinkMsgCallback<msgT>(
-            [this, tcfg, tid](const msgT& msg, const msg::ControlSignalInfo& info)
+        const auto key = r1::ControlSignalFactory::Instance().typeKey(typeid(MsgT));
+        if (key.empty())
+            throw std::invalid_argument("unregistered R1 control message type");
+        std::lock_guard<std::recursive_mutex> lock(core_->mutex);
+        auto& state = core_->types[key];
+        state.stop = config.emergencyStopCb;
+        state.changed = config.activeChangedCb;
+        const auto core = core_;
+        manager_->registerCallback<MsgT>(
+            [core, key, config = std::move(config)](const MsgT& message, const ControlSignalInfo& info)
             {
-                _onSinkMsg(msg, info, tid, tcfg);
+                std::lock_guard<std::recursive_mutex> lock(core->mutex);
+                if (core->stopping)
+                    return;
+                const auto endpoint = core->manager->getSink(info.controller_name);
+                const auto endpointState = endpoint.state();
+                if (!endpoint.valid() || !endpointState || *endpointState == r1::ControlSignalState::DISCONNECTED)
+                    return;
+                auto& state = core->types.at(key);
+                const auto now = Clock::now();
+                auto& record = state.records[info.channel_name];
+                const auto previousState = record.handle.state();
+                const bool replaced = state.active == info.channel_name && !record.info.controller_name.empty() &&
+                                      (!record.handle.valid() || !previousState ||
+                                       *previousState == r1::ControlSignalState::DISCONNECTED);
+                if (replaced)
+                {
+                    stopPrevious(state);
+                    if (state.changed)
+                        state.changed(info.channel_name);
+                }
+                record.info = info;
+                // Refresh every time: a retry replaces the endpoint, so retaining
+                // the old weak handle would break same-name reconnections.
+                record.handle = endpoint;
+                record.received = now;
+                record.blocked = false;
+
+                if (config.isEmergencyStop && config.isEmergencyStop(message))
+                {
+                    record.blocked = true;
+                    select(*core, key, state, best(state, now), false);
+                    state.hadOutput = false;
+                    if (state.stop)
+                        state.stop(info);
+                    return;
+                }
+                if (config.isRequestActive && config.isRequestActive(message))
+                {
+                    const auto active = state.records.find(state.active);
+                    if (active == state.records.end() || !usable(active->second, now) ||
+                        info.priority > active->second.info.priority)
+                        select(*core, key, state, info.channel_name);
+                    return;
+                }
+                const auto active = state.records.find(state.active);
+                if (active == state.records.end() || !usable(active->second, now))
+                    select(*core, key, state, best(state, now));
+                if (state.active != info.channel_name)
+                    return;
+                // A valid first message precedes the Manager's next ACTIVE tick.
+                // Arm the loss edge immediately, including one-packet sessions.
+                state.hadOutput = true;
+                state.lastOutput = info;
+                if (config.outputCb)
+                    config.outputCb(message, info);
             });
-
-        // Install the per-type safety-watchdog handler.
-        _installWatchdogHandler(tcfg, tid);
-
-        RCLCPP_INFO(node_->get_logger(),
-            "[ControlServer:%s] Registered TypeConfig for '%s'",
-            cfg_.name.c_str(), typeStr.c_str());
     }
 
-    // ── Manual active-sink control ────────────────────────────────────────────
-
-    /**
-     * @brief Manually select the active Sink for the given message type by channel_name.
-     * @return false if no Sink with that channel name and matching type is tracked,
-     *         or if the Sink has EMERGENCY_STOP priority (reserved, never an output source).
-     */
-    template<typename msgT>
-    bool setActiveSink(const std::string& channelName)
+    template <typename MsgT> std::string getActiveSink() const
     {
-        const std::type_index tid = typeid(msgT);
-        std::lock_guard<std::mutex> lk(typeMtx_);
-        auto it = typeStates_.find(tid);
-        if (it == typeStates_.end()) return false;
+        const auto key = r1::ControlSignalFactory::Instance().typeKey(typeid(MsgT));
+        std::lock_guard<std::recursive_mutex> lock(core_->mutex);
+        const auto it = core_->types.find(key);
+        return it == core_->types.end() ? std::string{} : it->second.active;
+    }
 
-        auto& st = it->second;
-        auto recIt = st.sinkRecords.find(channelName);
-        if (recIt == st.sinkRecords.end()) return false;
-        if (recIt->second.priority ==
-            msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP)
-        {
-            RCLCPP_WARN(node_->get_logger(),
-                "[ControlServer:%s] Refused manual activation of e-stop-priority sink '%s'",
-                cfg_.name.c_str(), channelName.c_str());
+    template <typename MsgT> bool setActiveSink(const std::string& channel)
+    {
+        const auto key = r1::ControlSignalFactory::Instance().typeKey(typeid(MsgT));
+        std::lock_guard<std::recursive_mutex> lock(core_->mutex);
+        const auto it = core_->types.find(key);
+        if (it == core_->types.end())
             return false;
-        }
-        st.activeChannel = channelName;
-        RCLCPP_INFO(node_->get_logger(),
-            "[ControlServer:%s] Active sink for type manually set to '%s'",
-            cfg_.name.c_str(), channelName.c_str());
+        const auto record = it->second.records.find(channel);
+        if (record == it->second.records.end() || !usable(record->second, Clock::now()))
+            return false;
+        select(*core_, key, it->second, channel);
         return true;
     }
 
-    /**
-     * @brief Returns the channel name of the currently active Sink for msgT ("" if none).
-     */
-    template<typename msgT>
-    std::string getActiveSinkChannel() const
-    {
-        const std::type_index tid = typeid(msgT);
-        std::lock_guard<std::mutex> lk(typeMtx_);
-        auto it = typeStates_.find(tid);
-        if (it == typeStates_.end()) return {};
-        return it->second.activeChannel;
-    }
-
-    /**
-     * @brief Expose the underlying ControlSignalManager.
-     */
-    const ControlSignalManager& csm() const { return csm_; }
-    ControlSignalManager&       csm()       { return csm_; }
+    r1::ControlSignalManager& csm() { return *manager_; }
+    const r1::ControlSignalManager& csm() const { return *manager_; }
 
 private:
-    // ── Per-type runtime state ────────────────────────────────────────────────
-
-    struct SinkRecord
+    using Clock = std::chrono::steady_clock;
+    struct Record
     {
-        std::shared_ptr<BaseControlSignalSink> sink;
-        int8_t priority = 0;
+        ControlSignalInfo info;
+        r1::SinkHandle handle;
+        Clock::time_point received{};
+        bool blocked = false;
     };
-
     struct TypeState
     {
-        std::map<std::string, SinkRecord> sinkRecords;  // key: channel_name
-        std::string                       activeChannel;
-        bool                              hadUsableSink = false;  // for e-stop edge detection
+        std::map<std::string, Record> records;
+        std::string active;
+        bool hadOutput = false;
+        ControlSignalInfo lastOutput;
+        std::function<void(const ControlSignalInfo&)> stop;
+        std::function<void(const std::string&)> changed;
+    };
+    struct Core
+    {
+        explicit Core(rclcpp::Logger loggerValue) :
+            logger(std::move(loggerValue))
+        {
+        }
+        std::recursive_mutex mutex;
+        bool stopping = false;
+        r1::ControlSignalManager* manager = nullptr;
+        rclcpp::Logger logger;
+        std::map<std::string, TypeState> types;
     };
 
-    // ── Members ───────────────────────────────────────────────────────────────
-
-    rclcpp::Node*        node_;
-    Config               cfg_;
-    ControlSignalManager csm_;
-
-    mutable std::mutex                   typeMtx_;
-    std::map<std::type_index, TypeState> typeStates_;
-
-    mutable std::mutex                watchdogHandlerMtx_;
-    std::vector<std::function<void()>> watchdogHandlers_;
-
-    rclcpp::TimerBase::SharedPtr watchdogTimer_;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Best (highest-priority ACTIVE or LOW_FREQ, non-EMERGENCY_STOP) channel.
-     *  ACTIVE sinks are preferred over LOW_FREQ sinks at the same priority level.
-     *  @param excludeChannel  channel to skip (e.g. the sink that just triggered e-stop). */
-    static std::string _selectBestLocked(const TypeState& st,
-                                         const std::string& excludeChannel = "")
+    static bool usable(const Record& record, Clock::time_point now)
     {
-        std::string best;
-        int8_t bestPri = -1;
-        bool   bestIsActive = false;   // whether best candidate is ACTIVE (not just LOW_FREQ)
-
-        for (const auto& [ch, rec] : st.sinkRecords)
-        {
-            if (!excludeChannel.empty() && ch == excludeChannel) continue;
-            if (rec.priority == msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP)
-                continue;
-            if (!rec.sink) continue;
-
-            const ControlSignalState s = rec.sink->getState();
-            const bool isUsable = (s == ControlSignalState::ACTIVE ||
-                                   s == ControlSignalState::LOW_FREQ);
-            if (!isUsable) continue;
-
-            const bool isActive = (s == ControlSignalState::ACTIVE);
-
-            // Higher priority always wins; at equal priority, ACTIVE beats LOW_FREQ.
-            if (rec.priority > bestPri ||
-                (rec.priority == bestPri && isActive && !bestIsActive))
-            {
-                bestPri      = rec.priority;
-                bestIsActive = isActive;
-                best         = ch;
-            }
-        }
-        return best;
+        if (record.blocked || !record.handle.valid())
+            return false;
+        const auto state = record.handle.state();
+        if (!state || *state == r1::ControlSignalState::DISCONNECTED)
+            return false;
+        // Use local receipt time for the consumer's safety watchdog. Manager
+        // state is committed on its tick and can still say INITIAL/TIMEOUT
+        // immediately after a fresh receive, or ACTIVE just after its deadline.
+        return record.info.timeout_ns == 0 || now - record.received < std::chrono::nanoseconds(record.info.timeout_ns);
     }
 
-    /**
-     * Called from the CSM sink-message callback on every received message.
-     * Drives e-stop / request-active logic and keeps SinkRecords in sync.
-     */
-    template<typename msgT>
-    void _onSinkMsg(const msgT& msg,
-                    const msg::ControlSignalInfo& info,
-                    std::type_index tid,
-                    const TypeConfig<msgT>& tcfg)
+    static std::string best(const TypeState& state, Clock::time_point now)
     {
-        // Ensure SinkRecord exists for this channel.
+        std::string channel;
+        int priority = -1;
+        for (const auto& [name, record] : state.records)
         {
-            std::lock_guard<std::mutex> lk(typeMtx_);
-            auto& st  = typeStates_[tid];
-            auto& rec = st.sinkRecords[info.channel_name];
-            if (!rec.sink)
+            if (usable(record, now) && record.info.priority > priority)
             {
-                rec.sink     = csm_.getSink(info.channel_name);
-                rec.priority = info.priority;
-
-                // Auto-select: first Sink when no active exists, or a higher-priority
-                // newcomer when the current active is not healthy (TIMEOUT / UNKNOWN).
-                // While the current active Sink is ACTIVE it keeps its slot; a non-active
-                // Sink must send a request-active message to take over.
-                const bool isEstopPriority =
-                    (rec.priority ==
-                     msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP);
-                if (st.activeChannel.empty() && !isEstopPriority)
-                {
-                    st.activeChannel = info.channel_name;
-                }
-                else if (!isEstopPriority)
-                {
-                    auto activeIt = st.sinkRecords.find(st.activeChannel);
-                    // Only auto-promote when the current active Sink is NOT healthy.
-                    const bool currentIsActive =
-                        (activeIt != st.sinkRecords.end() &&
-                         activeIt->second.sink &&
-                         activeIt->second.sink->getState() == ControlSignalState::ACTIVE);
-                    if (!currentIsActive &&
-                        activeIt != st.sinkRecords.end() &&
-                        rec.priority > activeIt->second.priority)
-                    {
-                        st.activeChannel = info.channel_name;
-                        RCLCPP_INFO(node_->get_logger(),
-                            "[ControlServer:%s] Higher-priority Sink '%s' (pri=%d) auto-selected",
-                            cfg_.name.c_str(), info.channel_name.c_str(),
-                            static_cast<int>(rec.priority));
-                    }
-                }
-            }
-            else if (rec.priority != info.priority)
-            {
-                // Keep the stored priority in sync with the descriptor so that
-                // auto-promote / selection (stored rec.priority) and request-active
-                // (fresh info.priority) always agree on a single source of truth.
-                RCLCPP_INFO(node_->get_logger(),
-                    "[ControlServer:%s] Sink '%s' priority updated %d -> %d",
-                    cfg_.name.c_str(), info.channel_name.c_str(),
-                    static_cast<int>(rec.priority), static_cast<int>(info.priority));
-                rec.priority = info.priority;
+                channel = name;
+                priority = record.info.priority;
             }
         }
+        return channel;
+    }
 
-        // E-stop check.
-        if (tcfg.isEmergencyStop && tcfg.isEmergencyStop(msg))
-        {
-            std::string best;
-            {
-                std::lock_guard<std::mutex> lk(typeMtx_);
-                auto& st         = typeStates_[tid];
-                // Exclude the e-stop sender so it is not re-selected as active.
-                st.activeChannel = _selectBestLocked(st, info.channel_name);
-                best             = st.activeChannel;
-                // Keep watchdog edge-state consistent: a usable fallback means we
-                // still have signal; no fallback means signal is lost (e-stop just
-                // fired here, so suppress a redundant watchdog e-stop).
-                st.hadUsableSink = !best.empty();
-            }
-            RCLCPP_WARN(node_->get_logger(),
-                "[ControlServer:%s] E-stop from '%s'. Fallback to '%s'.",
-                cfg_.name.c_str(), info.channel_name.c_str(),
-                best.empty() ? "(none)" : best.c_str());
-            if (tcfg.emergencyStopCb) tcfg.emergencyStopCb(info);
+    static void stopPrevious(TypeState& state)
+    {
+        if (!state.hadOutput)
             return;
-        }
-
-        // Request-active check (only for non-active Sinks).
-        if (tcfg.isRequestActive && tcfg.isRequestActive(msg))
-        {
-            std::lock_guard<std::mutex> lk(typeMtx_);
-            auto& st = typeStates_[tid];
-            if (info.channel_name != st.activeChannel &&
-                info.priority !=
-                    msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP)
-            {
-                int8_t activePri = -1;
-                auto   activeIt  = st.sinkRecords.find(st.activeChannel);
-                if (activeIt != st.sinkRecords.end())
-                    activePri = activeIt->second.priority;
-
-                if (info.priority > activePri)
-                {
-                    st.activeChannel = info.channel_name;
-                    RCLCPP_INFO(node_->get_logger(),
-                        "[ControlServer:%s] Request-active: switched to '%s' (pri=%d > %d)",
-                        cfg_.name.c_str(), info.channel_name.c_str(),
-                        static_cast<int>(info.priority), static_cast<int>(activePri));
-                }
-            }
-            return;  // request-active messages not forwarded to outputCb
-        }
-
-        // ── Event-triggered output ─────────────────────────────────────────────
-        // A normal control message has arrived.  Drive the output immediately
-        // (rather than via a periodic timer) when, and only when, it comes from
-        // the Sink currently selected as active for this type.
-        std::string activeChannel;
-        {
-            std::lock_guard<std::mutex> lk(typeMtx_);
-            auto it = typeStates_.find(tid);
-            if (it == typeStates_.end()) return;
-            activeChannel = it->second.activeChannel;
-        }
-        if (info.channel_name != activeChannel) return;
-
-        if (tcfg.outputCb) tcfg.outputCb(msg, info);
+        state.hadOutput = false;
+        if (state.stop)
+            state.stop(state.lastOutput);
     }
 
-    /** Called every watchdogIntervalNs — dispatches to all per-type handlers. */
-    void _watchdogTimerCb()
+    static void
+    select(Core& core, const std::string& type, TypeState& state, const std::string& channel, bool stopOutgoing = true)
     {
-        std::lock_guard<std::mutex> lk(watchdogHandlerMtx_);
-        for (auto& h : watchdogHandlers_) h();
+        if (state.active == channel)
+            return;
+        // Release the old command before waiting for the new owner's first
+        // ordinary packet. Neutral fallback and held request-active packets
+        // must never leave the robot executing the previous owner's velocity.
+        if (stopOutgoing)
+            stopPrevious(state);
+        state.active = channel;
+        RCLCPP_INFO(
+            core.logger, "[R1/%s] active channel: %s", type.c_str(), channel.empty() ? "(none)" : channel.c_str());
+        if (state.changed)
+            state.changed(channel);
     }
 
-    /**
-     * Install a per-type safety-watchdog handler.
-     *
-     * Output is event-triggered (see _onSinkMsg); this handler does NOT read or
-     * forward messages.  It only enforces safety on the watchdog timer:
-     *   - if the active Sink is no longer usable, re-select the next-best usable
-     *     Sink as active (output then resumes on that Sink's next message);
-     *   - if no usable Sink remains, fire emergencyStopCb once on the
-     *     loss-of-signal edge.
-     */
-    template<typename msgT>
-    void _installWatchdogHandler(TypeConfig<msgT> tcfg, std::type_index tid)
+    static void watch(Core& core, const std::string& type, TypeState& state)
     {
-        std::lock_guard<std::mutex> lk(watchdogHandlerMtx_);
-        watchdogHandlers_.push_back([this, tcfg, tid]()
+        const auto now = Clock::now();
+        for (auto it = state.records.begin(); it != state.records.end();)
         {
-            // Snapshot the relevant TypeState under lock.
-            std::string activeChannel;
-            TypeState   snapshot;
-            {
-                std::lock_guard<std::mutex> lk2(typeMtx_);
-                auto it = typeStates_.find(tid);
-                if (it == typeStates_.end()) return;
-                snapshot      = it->second;
-                activeChannel = it->second.activeChannel;
-            }
-
-            // Is the currently-active Sink still usable?
-            auto activeIt = snapshot.sinkRecords.find(activeChannel);
-            const ControlSignalState activeSt =
-                (activeIt != snapshot.sinkRecords.end() && activeIt->second.sink)
-                    ? activeIt->second.sink->getState()
-                    : ControlSignalState::UNKNOWN;
-            const bool activeUsable =
-                (activeSt == ControlSignalState::ACTIVE ||
-                 activeSt == ControlSignalState::LOW_FREQ);
-
-            if (activeUsable)
-            {
-                std::lock_guard<std::mutex> lk2(typeMtx_);
-                auto it = typeStates_.find(tid);
-                if (it != typeStates_.end()) it->second.hadUsableSink = true;
-                return;
-            }
-
-            // Active Sink lost — try to fall back to the next-best usable Sink.
-            const std::string best = _selectBestLocked(snapshot);
-            if (!best.empty())
-            {
-                std::lock_guard<std::mutex> lk2(typeMtx_);
-                auto it = typeStates_.find(tid);
-                if (it != typeStates_.end())
-                {
-                    if (it->second.activeChannel != best)
-                        RCLCPP_INFO(node_->get_logger(),
-                            "[ControlServer:%s] Active Sink lost — fell back to '%s'.",
-                            cfg_.name.c_str(), best.c_str());
-                    it->second.activeChannel = best;
-                    it->second.hadUsableSink = true;
-                }
-                return;
-            }
-
-            // No usable Sink at all — fire e-stop once on the loss-of-signal edge.
-            bool prevHad = false;
-            {
-                std::lock_guard<std::mutex> lk2(typeMtx_);
-                auto it = typeStates_.find(tid);
-                if (it == typeStates_.end()) return;
-                prevHad                  = it->second.hadUsableSink;
-                it->second.hadUsableSink = false;
-            }
-            if (prevHad)
-            {
-                RCLCPP_WARN(node_->get_logger(),
-                    "[ControlServer:%s] Active Sink lost and no usable Sink remains — e-stop.",
-                    cfg_.name.c_str());
-                if (tcfg.emergencyStopCb)
-                    tcfg.emergencyStopCb(msg::ControlSignalInfo{});
-            }
-        });
+            if (!it->second.handle.valid())
+                it = state.records.erase(it);
+            else
+                ++it;
+        }
+        const auto active = state.records.find(state.active);
+        if (active != state.records.end() && usable(active->second, now))
+            return;
+        select(core, type, state, best(state, now));
+        if (state.active.empty() && state.hadOutput)
+        {
+            state.hadOutput = false;
+            RCLCPP_WARN(core.logger, "[R1/%s] signal lost; emergency stop", type.c_str());
+            if (state.stop)
+                state.stop(state.lastOutput);
+        }
     }
+
+    std::shared_ptr<Core> core_;
+    std::unique_ptr<r1::ControlSignalManager> manager_;
+    rclcpp::TimerBase::SharedPtr timer_;
 };
 
-
-} // namespace rv2_interfaces::rv2_server_control
+}  // namespace rv2_interfaces::rv2_server_control

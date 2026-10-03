@@ -1,70 +1,78 @@
-"""
-control_server.launch.py  —  standalone production launch
+"""Start the R1 control server and one master, respecting deployment YAML."""
 
-Loads ControlServerNode alone in a single-threaded component container.
-No FakeUnitreeApiNode — suitable for connecting to a real Unitree robot.
-
-For the dev/debug variant (with FakeUnitreeApiNode), use:
-    control_server_composition.launch.py
-
-Launch arguments
-────────────────
-  server_name          CSM name exposed by this server  (default: control_server)
-  watchdog_interval_ms Safety watchdog poll period [ms] (default: 100)
-
-Usage
-─────
-  ros2 launch rv2_server_control control_server.launch.py
-  ros2 launch rv2_server_control control_server.launch.py \\
-      server_name:=my_robot  watchdog_interval_ms:=200
-"""
-
+import yaml
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import ComposableNodeContainer
-from launch_ros.descriptions import ComposableNode
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-def generate_launch_description():
-    args = [
-        DeclareLaunchArgument(
-            'config_file',
-            default_value=PathJoinSubstitution([
-                FindPackageShare('rv2_server_control'),
-                'config',
-                'control_server.yaml',
-            ]),
-            description='Path to ControlServerNode ROS 2 parameter YAML file'),
-        DeclareLaunchArgument(
-            'server_name', default_value='control_server',
-            description='CSM name exposed by ControlServerNode'),
-        DeclareLaunchArgument(
-            'watchdog_interval_ms', default_value='100',
-            description='Safety watchdog poll period in milliseconds'),
+def _nodes(context):
+    """Resolve optional overrides without replacing values from the YAML file."""
+    config_file = LaunchConfiguration("config_file").perform(context)
+    with open(config_file, encoding="utf-8") as stream:
+        config = yaml.safe_load(stream) or {}
+    parameters = {}
+    for key in ("/**", "control_server"):
+        parameters.update(config.get(key, {}).get("ros__parameters", {}))
+    overrides = {}
+    types = {
+        "server_name": str,
+        "master_name": str,
+        "watchdog_interval_ms": int,
+        "log_output": bool,
+    }
+    for name, value_type in types.items():
+        value = LaunchConfiguration(name).perform(context)
+        if value:
+            overrides[name] = ParameterValue(value, value_type=value_type)
+    master_name = LaunchConfiguration("master_name").perform(context)
+    if not master_name:
+        master_name = parameters.get("master_name", "csm_master")
+    return [
+        Node(
+            package="rv2_control_signal_transport",
+            executable="csm_master_node",
+            parameters=[{"master_name": ParameterValue(master_name, value_type=str)}],
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("start_master")),
+        ),
+        Node(
+            package="rv2_server_control",
+            executable="control_server",
+            name="control_server",
+            output="screen",
+            parameters=[config_file, overrides],
+        ),
     ]
 
-    container = ComposableNodeContainer(
-        name='control_server_container',
-        namespace='',
-        package='rclcpp_components',
-        executable='component_container',
-        composable_node_descriptions=[
-            ComposableNode(
-                package='rv2_server_control',
-                plugin='ControlServerNode',
-                name='control_server',
-                parameters=[
-                    LaunchConfiguration('config_file'),
-                    {
-                        'server_name':        LaunchConfiguration('server_name'),
-                        'watchdog_interval_ms': LaunchConfiguration('watchdog_interval_ms'),
-                    },
-                ],
-            ),
-        ],
-        output='screen',
-    )
 
-    return LaunchDescription(args + [container])
+def generate_launch_description():
+    """Build the production launch description."""
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=PathJoinSubstitution(
+                    [
+                        FindPackageShare("rv2_server_control"),
+                        "config",
+                        "control_server.yaml",
+                    ]
+                ),
+            ),
+            DeclareLaunchArgument("server_name", default_value=""),
+            DeclareLaunchArgument("watchdog_interval_ms", default_value=""),
+            DeclareLaunchArgument("log_output", default_value=""),
+            DeclareLaunchArgument("master_name", default_value=""),
+            DeclareLaunchArgument(
+                "start_master",
+                default_value="true",
+                description="Start one CSM master for lifecycle reconciliation",
+            ),
+            OpaqueFunction(function=_nodes),
+        ]
+    )
