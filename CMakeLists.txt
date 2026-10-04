@@ -56,10 +56,19 @@ ament_export_libraries(control_server_component)
 ament_export_dependencies(rclcpp rclcpp_components sensor_msgs geometry_msgs r1_interfaces
   rv2_control_signal_transport joy_interpreter unitree_api nlohmann_json)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+install(FILES thirdparty/unitree/LICENSE
+  DESTINATION share/${PROJECT_NAME}/thirdparty/unitree)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  ament_add_pytest_test(test_unitree_build
+    test/unit/test_unitree_build.py TIMEOUT 60)
+  set_property(TEST test_unitree_build APPEND PROPERTY LABELS unit)
+  ament_add_pytest_test(test_unitree_discovery
+    test/integration/test_unitree_discovery.py TIMEOUT 90)
+  set_property(TEST test_unitree_discovery APPEND PROPERTY LABELS integration)
   foreach(suite unit integration)
     ament_add_gtest(test_control_server_${suite}
       test/${suite}/test_control_server.cpp TIMEOUT 180)
