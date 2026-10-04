@@ -3,16 +3,18 @@
 
 import argparse
 import os
+import pathlib
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 
 from ament_index_python import packages as ament_packages
 
 SERVER = "rv2_server_control"
 API = "unitree_api"
-VENDORED_API = Path(__file__).resolve().parents[1] / "thirdparty/unitree/unitree_api"
+VENDORED_API = (
+    pathlib.Path(__file__).resolve().parents[1] / "thirdparty/unitree/unitree_api"
+)
 
 
 def discover_packages(roots):
@@ -26,7 +28,7 @@ def discover_packages(roots):
     packages = {}
     for line in result.stdout.splitlines():
         name, path, _ = line.split("\t", 2)
-        packages.setdefault(name, []).append(Path(path).resolve())
+        packages.setdefault(name, []).append(pathlib.Path(path).resolve())
     return packages
 
 
@@ -35,7 +37,7 @@ def underlay_prefix():
     if not os.environ.get("AMENT_PREFIX_PATH"):
         return None
     try:
-        return Path(ament_packages.get_package_prefix(API))
+        return pathlib.Path(ament_packages.get_package_prefix(API))
     except ament_packages.PackageNotFoundError:
         return None
 
@@ -68,7 +70,7 @@ def validate_build_arguments(arguments):
 def build_command(source_roots, arguments):
     """Choose one API provider and construct a dependency-aware colcon command."""
     validate_build_arguments(arguments)
-    roots = list(dict.fromkeys(Path(root).resolve() for root in source_roots))
+    roots = list(dict.fromkeys(pathlib.Path(root).resolve() for root in source_roots))
     for root in roots:
         if not root.is_dir():
             raise ValueError(f"Source root does not exist: {root}")
