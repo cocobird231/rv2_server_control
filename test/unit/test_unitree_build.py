@@ -34,8 +34,12 @@ def test_workspace_source_precedes_underlay_and_bundle(wrapper, workspace):
     wrapper.underlay_prefix.side_effect = AssertionError("source must win")
     command, provider = wrapper.build_command([root], [])
     assert command == [
-        "colcon", "build", "--base-paths", str(root),
-        "--packages-up-to", wrapper.SERVER,
+        "colcon",
+        "build",
+        "--base-paths",
+        str(root),
+        "--packages-up-to",
+        wrapper.SERVER,
     ]
     assert "workspace source" in provider
 
@@ -57,8 +61,15 @@ def test_fallback_preserves_paths_and_forwarded_argument_tokens(wrapper, workspa
     forwarded = ["--symlink-install", "--cmake-args", "-DLABEL=a b;$(false)"]
     command, provider = wrapper.build_command([root, spaced, root], forwarded)
     assert command == [
-        "colcon", "build", "--base-paths", str(root), str(spaced),
-        str(wrapper.VENDORED_API), "--packages-up-to", wrapper.SERVER, *forwarded,
+        "colcon",
+        "build",
+        "--base-paths",
+        str(root),
+        str(spaced),
+        str(wrapper.VENDORED_API),
+        "--packages-up-to",
+        wrapper.SERVER,
+        *forwarded,
     ]
     assert "bundled source" in provider
 
@@ -73,8 +84,21 @@ def test_duplicate_source_packages_fail(wrapper, workspace, name):
 
 
 @pytest.mark.parametrize(
-    "option", ["--base-paths=other", "--paths", "--metas", "--mixin",
-               "--packages-select", "--packages-skip=unitree_api", "--packages-up-to"]
+    "option",
+    [
+        "--base-paths=other",
+        "--paths",
+        "--metas",
+        "--mixin",
+        "--packages-select",
+        "--packages-skip=unitree_api",
+        "--packages-up-to",
+        "--base",
+        "--path=other",
+        "--meta",
+        "--pack",
+        "--mixin-files",
+    ],
 )
 def test_discovery_and_selection_overrides_rejected(wrapper, workspace, option):
     """Forwarded arguments cannot hide or skip the required fallback package."""
@@ -94,10 +118,14 @@ def test_missing_owner_or_source_root_fail(wrapper, workspace):
         wrapper.build_command([root], [])
 
 
-def test_discovery_failure_is_not_treated_as_missing_api(wrapper, workspace, monkeypatch):
+def test_discovery_failure_is_not_treated_as_missing_api(
+    wrapper, workspace, monkeypatch
+):
     """Propagate colcon failure and never start a build or probe fallback."""
     root, _ = workspace
-    wrapper.discover_packages.side_effect = subprocess.CalledProcessError(19, ["colcon", "list"])
+    wrapper.discover_packages.side_effect = subprocess.CalledProcessError(
+        19, ["colcon", "list"]
+    )
     build = Mock()
     monkeypatch.setattr(wrapper.subprocess, "call", build)
     assert wrapper.main(["--source-root", str(root)]) == 19

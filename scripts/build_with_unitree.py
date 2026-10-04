@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ament_index_python.packages import get_package_prefix, PackageNotFoundError
+from ament_index_python import packages as ament_packages
 
 SERVER = "rv2_server_control"
 API = "unitree_api"
@@ -35,17 +35,29 @@ def underlay_prefix():
     if not os.environ.get("AMENT_PREFIX_PATH"):
         return None
     try:
-        return Path(get_package_prefix(API))
-    except PackageNotFoundError:
+        return Path(ament_packages.get_package_prefix(API))
+    except ament_packages.PackageNotFoundError:
         return None
 
 
 def validate_build_arguments(arguments):
     """Keep discovery and dependency selection under this wrapper's control."""
-    reserved = {"--base-paths", "--paths", "--metas", "--ignore-user-meta", "--mixin"}
+    reserved = {
+        "--base-paths",
+        "--paths",
+        "--metas",
+        "--ignore-user-meta",
+        "--mixin",
+        "--mixin-files",
+        "--packages-",
+    }
     for argument in arguments:
         option = argument.split("=", 1)[0]
-        if option in reserved or option.startswith("--packages-"):
+        # colcon's argparse also accepts unambiguous long-option abbreviations.
+        if option.startswith("--") and (
+            option.startswith("--packages-")
+            or any(reserved_option.startswith(option) for reserved_option in reserved)
+        ):
             raise ValueError(
                 f"{option} changes package discovery or selection; use --source-root "
                 "for roots. This wrapper always builds --packages-up-to "
@@ -64,9 +76,13 @@ def build_command(source_roots, arguments):
     for name in (SERVER, API):
         paths = packages.get(name, [])
         if len(paths) > 1:
-            raise ValueError(f"Duplicate {name} source packages: {', '.join(map(str, paths))}")
+            raise ValueError(
+                f"Duplicate {name} source packages: {', '.join(map(str, paths))}"
+            )
     if SERVER not in packages:
-        raise ValueError(f"{SERVER} was not discovered; include its source via --source-root")
+        raise ValueError(
+            f"{SERVER} was not discovered; include its source via --source-root"
+        )
     if API in packages:
         provider = f"workspace source {packages[API][0]}"
     elif (prefix := underlay_prefix()) is not None:
@@ -77,8 +93,13 @@ def build_command(source_roots, arguments):
         roots.append(VENDORED_API)
         provider = f"bundled source {VENDORED_API}"
     command = [
-        "colcon", "build", "--base-paths", *map(str, roots),
-        "--packages-up-to", SERVER, *arguments,
+        "colcon",
+        "build",
+        "--base-paths",
+        *map(str, roots),
+        "--packages-up-to",
+        SERVER,
+        *arguments,
     ]
     return command, provider
 
@@ -90,11 +111,17 @@ def main(argv=None):
         epilog="Example: %(prog)s -- --symlink-install --cmake-args -DBUILD_TESTING=OFF",
     )
     parser.add_argument(
-        "--source-root", action="append", metavar="PATH",
+        "--source-root",
+        action="append",
+        metavar="PATH",
         help="Recursive source root, repeatable (default: ./src); quote paths with spaces",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Discover and print; do not build")
-    parser.add_argument("build_arguments", nargs=argparse.REMAINDER, metavar="-- BUILD_OPTIONS")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Discover and print; do not build"
+    )
+    parser.add_argument(
+        "build_arguments", nargs=argparse.REMAINDER, metavar="-- BUILD_OPTIONS"
+    )
     options = parser.parse_args(argv)
     arguments = options.build_arguments
     if arguments:
@@ -109,7 +136,10 @@ def main(argv=None):
             return 0
         return subprocess.call(command)
     except subprocess.CalledProcessError as error:
-        print(f"colcon discovery failed (exit {error.returncode}); build not started", file=sys.stderr)
+        print(
+            f"colcon discovery failed (exit {error.returncode}); build not started",
+            file=sys.stderr,
+        )
         return error.returncode
     except (OSError, ValueError) as error:
         print(f"{parser.prog}: {error}", file=sys.stderr)
