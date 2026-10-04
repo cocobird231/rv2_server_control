@@ -92,12 +92,20 @@ using TwistSource = ControlSignalSource<Twist, rv2_interfaces::srv::ControlSigna
     return "?";
 }
 
+// Priority tier literals matching the named-controller values of
+// requester_priority.yaml controller_priority (local_xbox=80, remote_sfu=50,
+// autonomous_agent=20). The old HIGH/MEDIUM/LOW constants were removed from
+// ControlSignalConst.msg in favour of the yaml table + *_CUSTOM class ceilings.
+static constexpr int8_t PRI_HIGH   = 80;
+static constexpr int8_t PRI_MEDIUM = 50;
+static constexpr int8_t PRI_LOW    = 20;
+
 static msg::ControlSignalInfo makeInfo(
     const std::string& channel,
     const std::string& type,
     const std::string& mode,
     const std::string& targetCsm   = "",
-    int8_t             priority    = msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM,
+    int8_t             priority    = PRI_MEDIUM,
     int64_t            timeoutNs   = 2'000'000'000LL,   // 2 s
     bool               useKA       = false,
     int64_t            kaIntervalNs = 300'000'000LL,    // 300 ms
@@ -115,6 +123,11 @@ static msg::ControlSignalInfo makeInfo(
     info.use_keep_alive         = useKA;
     info.keep_alive_interval_ns = kaIntervalNs;
     info.disconnect_timeout_ns  = disconnectTimeoutNs;
+    // Required fields (validator rules 8/9): channel doubles as controller
+    // identity in tests; all test controllers use the local custom class.
+    info.controller_name        = channel;
+    info.controller_priority_type =
+        msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOCAL_CUSTOM;
     return info;
 }
 
@@ -411,10 +424,10 @@ bool testCS3_PriorityAutoSelect(
 
     // LOW has a short 500 ms timeout; HIGH has the default 2 s timeout.
     auto infoLow  = makeInfo("cs3/joy_low",  TYPE_JOY, MODE_TOPIC, "cs3_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW,
+                             PRI_LOW,
                              500'000'000LL);   // 500 ms
     auto infoHigh = makeInfo("cs3/joy_high", TYPE_JOY, MODE_TOPIC, "cs3_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                             PRI_HIGH);
 
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS3", "low registerSource failed");
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS3", "high registerSource failed");
@@ -474,9 +487,9 @@ bool testCS4_ManualActiveSinkOverride(
 
     // Both with MEDIUM priority
     auto infoA = makeInfo("cs4/joy_a", TYPE_JOY, MODE_TOPIC, "cs4_server",
-                          msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM);
+                          PRI_MEDIUM);
     auto infoB = makeInfo("cs4/joy_b", TYPE_JOY, MODE_TOPIC, "cs4_server",
-                          msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM);
+                          PRI_MEDIUM);
 
     if (!csmRegisterSource(csmA, infoA)) FAIL("CS4", "A registerSource failed");
     if (!csmRegisterSource(csmB, infoB)) FAIL("CS4", "B registerSource failed");
@@ -533,10 +546,10 @@ bool testCS5_FallbackOnTimeout(
     ControlSignalManager csmLow (srcNodeLow.get(),  "cs5_csm_low");
 
     auto infoHigh = makeInfo("cs5/joy_high", TYPE_JOY, MODE_TOPIC, "cs5_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH,
+                             PRI_HIGH,
                              500'000'000LL);  // 500 ms timeout
     auto infoLow  = makeInfo("cs5/joy_low",  TYPE_JOY, MODE_TOPIC, "cs5_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW,
+                             PRI_LOW,
                              2'000'000'000LL);  // 2 s timeout
 
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS5", "high registerSource failed");
@@ -596,9 +609,9 @@ bool testCS6_EmergencyStop(
     ControlSignalManager csmLow (srcNodeLow.get(),  "cs6_csm_low");
 
     auto infoHigh = makeInfo("cs6/joy_high", TYPE_JOY, MODE_TOPIC, "cs6_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                             PRI_HIGH);
     auto infoLow  = makeInfo("cs6/joy_low",  TYPE_JOY, MODE_TOPIC, "cs6_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                             PRI_LOW);
 
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS6", "high registerSource failed");
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS6", "low registerSource failed");
@@ -654,9 +667,9 @@ bool testCS7_RequestActive(
     ControlSignalManager csmHigh(srcNodeHigh.get(), "cs7_csm_high");
 
     auto infoLow  = makeInfo("cs7/joy_low",  TYPE_JOY, MODE_TOPIC, "cs7_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                             PRI_LOW);
     auto infoHigh = makeInfo("cs7/joy_high", TYPE_JOY, MODE_TOPIC, "cs7_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                             PRI_HIGH);
 
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS7", "low registerSource failed");
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS7", "high registerSource failed");
@@ -697,7 +710,7 @@ bool testCS7_RequestActive(
     // (takeover requires priority STRICTLY greater than the incumbent's).
     ControlSignalManager csmEq(srcNodeLow.get(), "cs7_csm_eq");
     auto infoEq = makeInfo("cs7/joy_eq", TYPE_JOY, MODE_TOPIC, "cs7_server",
-                           msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                           PRI_HIGH);
     if (!csmRegisterSource(csmEq, infoEq)) FAIL("CS7", "eq registerSource failed");
     rclcpp::sleep_for(300ms);
     auto* srcEq = dynamic_cast<JoySource*>(csmEq.getSource("cs7/joy_eq").get());
@@ -730,7 +743,7 @@ bool testCS8_EmergencyStopPrioritySink(
     ControlSignalManager csmEstop (srcNodeEstop.get(),  "cs8_csm_estop");
 
     auto infoNormal = makeInfo("cs8/joy_normal", TYPE_JOY, MODE_TOPIC, "cs8_server",
-                               msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM);
+                               PRI_MEDIUM);
     auto infoEstop  = makeInfo("cs8/joy_estop",  TYPE_JOY, MODE_TOPIC, "cs8_server",
                                msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP);
 
@@ -799,9 +812,9 @@ bool testCS9_OutputCbActiveOnly(
     ControlSignalManager csmB(srcNodeB.get(), "cs9_csm_b");
 
     auto infoA = makeInfo("cs9/joy_a", TYPE_JOY, MODE_TOPIC, "cs9_server",
-                          msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                          PRI_HIGH);
     auto infoB = makeInfo("cs9/joy_b", TYPE_JOY, MODE_TOPIC, "cs9_server",
-                          msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                          PRI_LOW);
 
     if (!csmRegisterSource(csmA, infoA)) FAIL("CS9", "A registerSource failed");
     if (!csmRegisterSource(csmB, infoB)) FAIL("CS9", "B registerSource failed");
@@ -860,7 +873,7 @@ bool testCS10_NoActiveSink(
 
     ControlSignalManager csmSrc(srcNode.get(), "cs10_csm_src");
     auto info = makeInfo("cs10/joy", TYPE_JOY, MODE_TOPIC, "cs10_server",
-                         msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM,
+                         PRI_MEDIUM,
                          300'000'000LL);  // 300 ms timeout
 
     if (!csmRegisterSource(csmSrc, info)) FAIL("CS10", "registerSource failed");
@@ -904,7 +917,7 @@ bool testCS11_ServiceModeOutputCb(
     ControlSignalManager srcCsm(srcNode.get(), "cs11_source_csm");
     // timeout_ns is reused as the service-call wait timeout inside send().
     auto info = makeInfo("cs11/joy_svc", TYPE_JOY, MODE_SERVICE, "cs11_server",
-                         msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM,
+                         PRI_MEDIUM,
                          500'000'000LL);  // 500 ms service-call timeout
 
     if (!csmRegisterSource(srcCsm, info))
@@ -959,10 +972,10 @@ bool testCS12_ServiceModeEmergencyStop(
 
     // HIGH uses SERVICE mode; LOW uses TOPIC mode so it can keep refreshing freely.
     auto infoHigh = makeInfo("cs12/joy_high", TYPE_JOY, MODE_SERVICE, "cs12_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH,
+                             PRI_HIGH,
                              500'000'000LL);  // 500 ms service-call timeout
     auto infoLow  = makeInfo("cs12/joy_low",  TYPE_JOY, MODE_TOPIC,   "cs12_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                             PRI_LOW);
 
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS12", "high registerSource failed");
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS12", "low registerSource failed");
@@ -1196,9 +1209,9 @@ bool testCS16_TwistEmergencyStop(
     ControlSignalManager csmLow (srcNodeLow.get(),  "cs16_csm_low");
 
     auto infoHigh = makeInfo("cs16/twist_high", TYPE_TWIST, MODE_TOPIC, "cs16_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                             PRI_HIGH);
     auto infoLow  = makeInfo("cs16/twist_low",  TYPE_TWIST, MODE_TOPIC, "cs16_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                             PRI_LOW);
 
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS16", "high registerSource failed");
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS16", "low registerSource failed");
@@ -1251,9 +1264,9 @@ bool testCS17_TwistRequestActive(
     ControlSignalManager csmHigh(srcNodeHigh.get(), "cs17_csm_high");
 
     auto infoLow  = makeInfo("cs17/twist_low",  TYPE_TWIST, MODE_TOPIC, "cs17_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_LOW);
+                             PRI_LOW);
     auto infoHigh = makeInfo("cs17/twist_high", TYPE_TWIST, MODE_TOPIC, "cs17_server",
-                             msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH);
+                             PRI_HIGH);
 
     if (!csmRegisterSource(csmLow,  infoLow))  FAIL("CS17", "low registerSource failed");
     if (!csmRegisterSource(csmHigh, infoHigh)) FAIL("CS17", "high registerSource failed");
@@ -1386,7 +1399,7 @@ bool testCS19_FallbackToLowFreq(
     auto hiInfo = makeInfo(
         "cs19/joy_hi",
         TYPE_JOY, MODE_TOPIC, "cs19_server",
-        msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_HIGH,
+        PRI_HIGH,
         2'000'000'000LL,  // timeout: 2 s
         false, 0,
         10.0f,            // send_freq_hz: 10 Hz (100 ms period)
@@ -1394,7 +1407,7 @@ bool testCS19_FallbackToLowFreq(
     auto mdInfo = makeInfo(
         "cs19/joy_md",
         TYPE_JOY, MODE_TOPIC, "cs19_server",
-        msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM,
+        PRI_MEDIUM,
         2'000'000'000LL,
         false, 0,
         10.0f,
@@ -1460,7 +1473,7 @@ bool testCS20_AutoDisconnectTimeout(
     auto info = makeInfo(
         "cs20/joy",
         TYPE_JOY, MODE_TOPIC, "cs20_tgt_csm",
-        msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_MEDIUM,
+        PRI_MEDIUM,
         500'000'000LL,     // timeout: 500 ms
         false, 0,
         0.0f,              // send_freq_hz: disabled

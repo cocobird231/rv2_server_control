@@ -18,6 +18,9 @@
   <depend>rv2_control_signal_transport</depend>
   <depend>joy_interpreter</depend>
   <depend>unitree_api</depend>
+  <depend>unitree_go</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>yaml-cpp</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

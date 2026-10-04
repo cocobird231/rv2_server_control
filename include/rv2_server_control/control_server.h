@@ -240,6 +240,71 @@ public:
         return it->second.activeChannel;
     }
 
+    /** Channel name + priority of an active Sink (type-erased view). */
+    struct ActiveSinkInfo
+    {
+        std::string channel;   ///< empty = no active sink
+        int8_t      priority = -1;
+    };
+
+    /**
+     * @brief Single-output-controller view: the currently active Sink across
+     *        ALL registered types. When more than one type has an active
+     *        selection, the highest-priority one is reported.
+     */
+    ActiveSinkInfo getActiveSinkAny() const
+    {
+        std::lock_guard<std::mutex> lk(typeMtx_);
+        ActiveSinkInfo best;
+        for (const auto& [tid, st] : typeStates_)
+        {
+            if (st.activeChannel.empty()) continue;
+            auto it = st.sinkRecords.find(st.activeChannel);
+            const int8_t pri =
+                (it != st.sinkRecords.end()) ? it->second.priority : -1;
+            if (best.channel.empty() || pri > best.priority)
+                best = ActiveSinkInfo{st.activeChannel, pri};
+        }
+        return best;
+    }
+
+    /**
+     * @brief Manually select the active Sink by channel name only, searching
+     *        all registered types (single-output-controller semantics: the
+     *        owning type gets the channel as active, every other type's
+     *        active selection is cleared).
+     * @return false if no type tracks the channel, or the Sink has
+     *         EMERGENCY_STOP priority.
+     */
+    bool setActiveSinkByName(const std::string& channelName)
+    {
+        std::lock_guard<std::mutex> lk(typeMtx_);
+        TypeState* owner = nullptr;
+        for (auto& [tid, st] : typeStates_)
+        {
+            auto it = st.sinkRecords.find(channelName);
+            if (it == st.sinkRecords.end()) continue;
+            if (it->second.priority ==
+                msg::ControlSignalConst::CONTROL_SIGNAL_PRIORITY_EMERGENCY_STOP)
+            {
+                RCLCPP_WARN(node_->get_logger(),
+                    "[ControlServer:%s] Refused manual activation of e-stop-priority sink '%s'",
+                    cfg_.name.c_str(), channelName.c_str());
+                return false;
+            }
+            owner = &st;
+            break;
+        }
+        if (!owner) return false;
+
+        for (auto& [tid, st] : typeStates_)
+            st.activeChannel = (&st == owner) ? channelName : std::string{};
+        RCLCPP_INFO(node_->get_logger(),
+            "[ControlServer:%s] Active output controller set to '%s' (by name)",
+            cfg_.name.c_str(), channelName.c_str());
+        return true;
+    }
+
     /**
      * @brief Expose the underlying ControlSignalManager.
      */
@@ -331,7 +396,9 @@ private:
             auto& rec = st.sinkRecords[info.channel_name];
             if (!rec.sink)
             {
-                rec.sink     = csm_.getSink(info.channel_name);
+                // CSM sinks are keyed by controller_name (sinkRecords stays
+                // keyed by channel_name for the arbitration logic).
+                rec.sink     = csm_.getSink(info.controller_name);
                 rec.priority = info.priority;
 
                 // Auto-select: first Sink when no active exists, or a higher-priority

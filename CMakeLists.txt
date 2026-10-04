@@ -15,8 +15,11 @@ find_package(std_msgs REQUIRED)
 find_package(rv2_interfaces REQUIRED)
 find_package(rv2_control_signal_transport REQUIRED)
 find_package(joy_interpreter REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 find_package(unitree_api REQUIRED)
+find_package(unitree_go REQUIRED)
 
 # ── control_server (composable node) ─────────────────────────────────────────
 add_library(control_server_component SHARED
@@ -37,11 +40,14 @@ ament_target_dependencies(control_server_component
   std_msgs
   rv2_interfaces
   unitree_api
+  unitree_go
   rv2_control_signal_transport
   joy_interpreter
+  ament_index_cpp
 )
 target_link_libraries(control_server_component
   joy_interpreter::joy_interpreter_lib
+  yaml-cpp::yaml-cpp
 )
 rclcpp_components_register_node(control_server_component
   PLUGIN "ControlServerNode"

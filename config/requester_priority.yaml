@@ -1,0 +1,42 @@
+# Priority tables of the control server — the single source of truth for the
+# rv2 priority concept. Loaded by ControlServerNode (parameter
+# 'requester_priority_file').
+#
+# requester_priority — service-side identities (ControlServerReq.srv):
+#   Only identities listed in this file (either table) may issue mutating
+#   requests (REQUEST_SET_OUTPUT, REQUEST_CLEAR_INTERRUPT); unknown
+#   requesters are rejected.
+#   - REQUEST_SET_OUTPUT rule: the requester's priority must be strictly
+#     greater than the priority of the current output controller, otherwise
+#     the request is rejected with "insufficient permission".
+#   - REQUEST_CLEAR_INTERRUPT rule: any identity listed in this file may
+#     clear the external-intervention flag (nothing outranks the wireless
+#     controller, so the clear action is open to all listed identities). New
+#     data arriving on the wireless controller topic re-raises the
+#     interruption immediately.
+#
+# controller_priority — controller priority convention:
+#   - A NAMED controller registers with the matching controller_name and the
+#     table value as its priority (e.g. local_xbox → 80).
+#   - A controller not listed here is a CUSTOM controller: register a UNIQUE
+#     priority at or below its controller_priority_type class ceiling
+#     (LOCAL_CUSTOM=79 / REMOTE_CUSTOM=49 / AUTONOMOUS_CUSTOM=19, see
+#     ControlSignalConst.msg). Controller names and priorities are expected
+#     to be unique per server.
+#   - wireless (100) is the external intervention level: it never registers
+#     as a CSM controller; data on the wireless controller topic interrupts
+#     the output directly.
+
+requester_priority:
+  local_gui: 95                   # Local control server GUI.
+  emergency_stop: 94              # Emergency stop requester.
+  remote_gui: 90                  # Remote GUI.
+
+controller_priority:
+  wireless: 100          # External wireless controller intervention (highest; never a CSM sink).
+  local_xbox: 80         # Local field Xbox joystick.
+  local_custom: 79       # Local custom controller class ceiling; must not exceed local_xbox.
+  remote_sfu: 50         # Remote operator via SFU.
+  remote_custom: 49      # Remote custom controller class ceiling; must not exceed remote_sfu.
+  autonomous_agent: 20   # Autonomous agent control.
+  autonomous_custom: 19  # Custom autonomous controller class ceiling; must not exceed autonomous_agent.
