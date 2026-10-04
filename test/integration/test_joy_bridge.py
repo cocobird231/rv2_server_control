@@ -80,7 +80,7 @@ class TestJoyPipeline(unittest.TestCase):
         cls.axes = list(IDLE_AXES)
         cls.axes[0] = 0.2
         cls.buttons = [0] * 12
-        cls.enabled = True
+        cls.enabled = False
         cls.requests = []
         cls.statuses = {}
         cls.publisher = cls.node.create_publisher(
@@ -173,6 +173,18 @@ class TestJoyPipeline(unittest.TestCase):
 
     def test_data_stop_reconnect_and_peer_restart(self, proc_info, bridge, server):
         """Verify translation, no stale replay, loss edge, and both peer restarts."""
+        # The first Move is emitted only once for held axes. Match both ends
+        # before publishing so the observer cannot miss that initial event.
+        self.assertTrue(
+            self.wait_for(
+                lambda: (
+                    self.publisher.get_subscription_count() > 0
+                    and self.request_sub.get_publisher_count() > 0
+                )
+            ),
+            "Joy input or Unitree request observer did not match",
+        )
+        self.update(enabled=True)
         self.assertTrue(
             self.wait_for(lambda: self.count(MOVE) > 0), "no initial R1 output"
         )
