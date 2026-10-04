@@ -20,9 +20,9 @@
   <depend>joy_interpreter</depend>
   <depend>unitree_api</depend>
 
-  <!-- The upstream unitree_api CMake requires this undeclared dependency. -->
-  <test_depend>rosidl_generator_dds_idl</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-colcon-common-extensions</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>launch</test_depend>

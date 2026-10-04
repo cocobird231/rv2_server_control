@@ -41,23 +41,33 @@ ros2 service call /control_server/control_signal_info_req r1_interfaces/srv/Cont
 
 ## 建置依賴
 
-標準 ROS dependencies 由 rosdep 安裝。將下列 source packages 放在 server 的 sibling 位置；測試框架由 `test_depends.repos` 唯讀掛載：
+標準 ROS dependencies 由 rosdep 安裝。Server 仍宣告並以 `find_package(unitree_api REQUIRED)` 使用獨立的 Unitree ROS package；colcon 在辨識到 server 的 `package.xml` 後不會繼續搜尋其內部套件，因此使用以下入口補足 discovery。
 
-| 路徑 | 來源／本次驗證基線 |
+先 source ROS 及所需 underlay，從 workspace 根目錄執行：
+
+```bash
+# 預覽實際來源選擇與 colcon 命令，不編譯
+python3 src/rv2_server_control/scripts/build_with_unitree.py --dry-run
+
+# 自動選擇 Unitree API source，先建依賴再建 server
+python3 src/rv2_server_control/scripts/build_with_unitree.py -- --symlink-install
+```
+
+入口先搜尋 `src` 中的 `unitree_api`，其次使用已 source underlay 提供的套件；兩者都沒有時才將內附 `thirdparty/unitree/unitree_api` 加入 `--base-paths`。預設 `--packages-up-to rv2_server_control` 保證有來源的依賴先完成，並只補 server 所需的 API，不自動建 `unitree_go`／`unitree_hg`。重複套件或 discovery 失敗會回報錯誤，不以 fallback 掩蓋。
+
+來源位置不同時可重複傳入 `--source-root PATH`；例如在 project 根目錄，使用 `python3 ros2_ws/src/rv2_server_control/scripts/build_with_unitree.py --source-root ros2_ws/src`。`--` 之後可傳 colcon 的一般建置選項（如 `--cmake-args -DCMAKE_BUILD_TYPE=Release`），來源與 package selection 選項由入口管理。一般 `colcon build` 本身沒有新增 fallback 行為；要自行選任意套件時，明確指定其來源並直接使用 colcon。
+
+其餘來源依賴須放在 server 的 sibling 位置，測試框架由 `test_depends.repos` 唯讀掛載：
+
+| 路徑 | 來源／驗證基線 |
 |---|---|
 | `../r1_interfaces` | R1 v0.1.2，已合併主線 `a0530d7` |
 | `../rv2_control_signal_transport` | R1 v0.2.0，已合併主線 `5a91d31` |
-| `../rv2_csm_topic_bridge` | 本次 R1 migration 配對版本 |
+| `../rv2_csm_topic_bridge` | R1 v0.1.0，已合併主線 `78ba1a9` |
 | `../joy_interpreter` | `test` 分支 `944306b61746dcdaa932a404994b8f829a2a9611` |
-| `../unitree_api` | 官方 `unitree_ros2` commit `5204e6e098ee53f4bd929bd77eb1d387cd0fa842` 的 `cyclonedds_ws/src/unitree/unitree_api` |
+| `thirdparty/unitree/unitree_api` | 內附官方 `unitree_ros2` commit `5204e6e098ee53f4bd929bd77eb1d387cd0fa842` 的 API sources |
 
-`../unitree_api` 可用 symlink 指向該官方 source 子目錄，例如：
-
-```bash
-ln -s /path/to/unitree_ros2/cyclonedds_ws/src/unitree/unitree_api ../unitree_api
-```
-
-只取 `unitree_api`，不需 `unitree_go` 或整個 Unitree workspace。上游 `unitree_api` CMake 使用但 manifest 未宣告的 `rosidl_generator_dds_idl`，本 package 的 test dependency 補足乾淨 Docker 建置環境。JSON CMake package 是 `nlohmann_json`，對應 rosdep key 為 `nlohmann-json-dev`。
+不再需要外部 `../unitree_api` checkout 或 symlink。三份內附 Unitree manifest 都已補上其 CMake 所需的 `rosidl_generator_dds_idl` build dependency；來源、BSD 授權與本地修改見 [thirdparty/unitree/README.md](thirdparty/unitree/README.md)。JSON CMake package 是 `nlohmann_json`，對應 rosdep key 為 `nlohmann-json-dev`。
 
 ## 測試
 
@@ -72,10 +82,13 @@ git submodule update --init --recursive
 ./r1_test_framework/test_lint.sh
 ```
 
-完整 test_run 包含 unit、integration 與 ament 檢查。新 owner 尚未列入 framework sanitizer matrix，因此 ASan／UBSan／TSan 都顯示 N/A，不冒稱通過 sanitizer；框架的顯式 TSan 開關仍預設 off。lint 是獨立唯讀 Docker gate。可在 build/deps 後以 `test_run.sh -s unit` 或 `-s integration` 單獨執行分類；結果保存於 `test_env/jazzy/`。
+測試固定使用內附 API，即使主機另有 Unitree underlay 亦不依賴它。完整 test_run 包含 unit、integration 與 ament 檢查。新 owner 尚未列入 framework sanitizer matrix，因此 ASan／UBSan／TSan 都顯示 N/A，不冒稱通過 sanitizer；框架的顯式 TSan 開關仍預設 off。lint 是獨立唯讀 Docker gate。可在 build/deps 後以 `test_run.sh -s unit` 或 `-s integration` 單獨執行分類；結果保存於 `test_env/jazzy/`。
 
+- `test/unit/test_unitree_build.py`／`test/integration/test_unitree_discovery.py`：來源優先序、錯誤傳遞與真實 colcon nested discovery。
 - `test/unit/test_control_server.cpp`：Joy 短陣列、Twist sentinel、converter per-channel／per-instance 去重、reset 同值恢復、button press edge。
 - `test/integration/test_control_server.cpp`：R1 topic/service Joy/Twist、priority 100、request-active 優先權、超時 fallback 與單次急停、單封訊號、重新註冊、disabled timeout、manual selection、TypeConfig 更新、callback 執行中安全結束。
 - `test/integration/test_joy_bridge.py`：真正 master／bridge／server processes，best-effort Joy→Unitree x/y/yaw 與按鍵、保持值去重、input silence 無重播、同值恢復、bridge crash/restart、server crash/restart 與 master 對帳。readiness 根據實際輸出與 R1 incarnation 判定。
 
 新版基於已提交 develop `cf99d823`，原 checkout 的 staged／unstaged wireless intervention／ControlServerReq 實驗仍保留在原處；該未提交功能依賴 legacy interface，不屬本次 R1 發布。Package 版本、tag、PR 依 project `r1_todo.md` §1 在功能與驗證完成後獨立處理。
+
+目前 framework v0.5.1 的 `test_packages.sh` 對內部 source path 與 sibling bind mount 有嚴格路徑比對限制；本次驗證涵蓋四步測試、lint 與 source build，未提供 Debian 打包支援。
