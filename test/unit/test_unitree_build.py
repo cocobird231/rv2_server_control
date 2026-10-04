@@ -1,9 +1,9 @@
 """Check source precedence and safe argument handling without invoking a build."""
 
+import importlib.util
+import pathlib
 import subprocess
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
-from unittest.mock import Mock
+import unittest.mock
 
 import pytest
 
@@ -11,9 +11,9 @@ import pytest
 @pytest.fixture
 def wrapper():
     """Load the source entry point without running its command-line main."""
-    path = Path(__file__).resolve().parents[2] / "scripts/build_with_unitree.py"
-    spec = spec_from_file_location("unitree_build", path)
-    module = module_from_spec(spec)
+    path = pathlib.Path(__file__).resolve().parents[2] / "scripts/build_with_unitree.py"
+    spec = importlib.util.spec_from_file_location("unitree_build", path)
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -22,8 +22,12 @@ def wrapper():
 def workspace(wrapper, tmp_path, monkeypatch):
     """Provide a discoverable owner while making all subprocesses explicit mocks."""
     sources = {wrapper.SERVER: [tmp_path / wrapper.SERVER]}
-    monkeypatch.setattr(wrapper, "discover_packages", Mock(return_value=sources))
-    monkeypatch.setattr(wrapper, "underlay_prefix", Mock(return_value=None))
+    monkeypatch.setattr(
+        wrapper, "discover_packages", unittest.mock.Mock(return_value=sources)
+    )
+    monkeypatch.setattr(
+        wrapper, "underlay_prefix", unittest.mock.Mock(return_value=None)
+    )
     return tmp_path, sources
 
 
@@ -126,7 +130,7 @@ def test_discovery_failure_is_not_treated_as_missing_api(
     wrapper.discover_packages.side_effect = subprocess.CalledProcessError(
         19, ["colcon", "list"]
     )
-    build = Mock()
+    build = unittest.mock.Mock()
     monkeypatch.setattr(wrapper.subprocess, "call", build)
     assert wrapper.main(["--source-root", str(root)]) == 19
     build.assert_not_called()
@@ -136,7 +140,7 @@ def test_discovery_failure_is_not_treated_as_missing_api(
 def test_dry_run_and_build_exit_status(wrapper, workspace, monkeypatch, capsys):
     """Dry-run prints the decision; a real invocation retains colcon's status."""
     root, _ = workspace
-    build = Mock(return_value=7)
+    build = unittest.mock.Mock(return_value=7)
     monkeypatch.setattr(wrapper.subprocess, "call", build)
     args = ["--source-root", str(root)]
     assert wrapper.main([*args, "--dry-run", "--", "--symlink-install"]) == 0

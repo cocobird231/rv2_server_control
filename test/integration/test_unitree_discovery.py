@@ -1,22 +1,22 @@
 """Check fallback planning against real colcon discovery, without building nodes."""
 
+import importlib.util
+import pathlib
 import shutil
 import subprocess
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
 import pytest
 
-OWNER = Path(__file__).resolve().parents[2]
+OWNER = pathlib.Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
 def wrapper():
     """Load the same command users invoke from their workspace root."""
-    spec = spec_from_file_location(
+    spec = importlib.util.spec_from_file_location(
         "unitree_build", OWNER / "scripts/build_with_unitree.py"
     )
-    module = module_from_spec(spec)
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
