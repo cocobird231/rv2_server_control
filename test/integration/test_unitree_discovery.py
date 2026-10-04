@@ -13,7 +13,9 @@ OWNER = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def wrapper():
     """Load the same command users invoke from their workspace root."""
-    spec = spec_from_file_location("unitree_build", OWNER / "scripts/build_with_unitree.py")
+    spec = spec_from_file_location(
+        "unitree_build", OWNER / "scripts/build_with_unitree.py"
+    )
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -53,7 +55,9 @@ def test_nested_api_needs_explicit_fallback_root(wrapper, workspace):
     assert not (wrapper.VENDORED_API / "AMENT_IGNORE").exists()
 
 
-def test_workspace_api_wins_over_sourced_underlay(wrapper, workspace, tmp_path, monkeypatch):
+def test_workspace_api_wins_over_sourced_underlay(
+    wrapper, workspace, tmp_path, monkeypatch
+):
     """An external source copy is the sole API selected, even with an underlay."""
     external = workspace / "unitree_api"
     shutil.copytree(wrapper.VENDORED_API, external)
@@ -68,7 +72,9 @@ def test_workspace_api_wins_over_sourced_underlay(wrapper, workspace, tmp_path, 
     assert command_packages(command) == {"rv2_server_control", "unitree_api"}
 
 
-def test_sourced_underlay_suppresses_fallback(wrapper, workspace, tmp_path, monkeypatch):
+def test_sourced_underlay_suppresses_fallback(
+    wrapper, workspace, tmp_path, monkeypatch
+):
     """A real ament-index marker selects the sourced API without adding sources."""
     prefix = tmp_path / "underlay"
     marker = prefix / "share/ament_index/resource_index/packages/unitree_api"
