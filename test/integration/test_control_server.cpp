@@ -59,7 +59,7 @@ protected:
         config.interruptionStopCb = [this]
         {
             ++interruptionStops_;
-            server_->recordOutput(sinkNode_->now().to_msg(), "", 1003, "", {});
+            server_->recordOutput(sinkNode_->now(), "", 1003, "", {});
         };
         config.resetOutputCb = [this]
         {
@@ -781,7 +781,7 @@ TEST_F(ServerIntegration, InterruptFencesInFlightOutputAndAllowsRecursiveStatusQ
         gate->entered = true;
         while (!gate->release.load())
             std::this_thread::yield();
-        server_->recordOutput(sinkNode_->now().to_msg(), info.controller_name, 1008, "in-flight", {});
+        server_->recordOutput(sinkNode_->now(), info.controller_name, 1008, "in-flight", {});
         EXPECT_EQ(server_->getStatus().output_controller_name, info.controller_name);
         ++gate->outputs;
     };
