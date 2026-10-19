@@ -1,6 +1,6 @@
 # Control Server 現行架構、服務與控制權仲裁
 
-查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 使用 `r1_interfaces` 的新候選版本，尚未合併，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表新版本已發布或已完成實機驗收。
+查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 使用 `r1_interfaces` v0.1.3 候選 `34e5d1e`，尚未合併；server 的 CMake 與 manifest 明確要求 interfaces ≥0.1.3，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表 server 新版本已發布或已完成實機驗收。
 
 ## 1. 目前行為摘要
 
@@ -264,7 +264,7 @@ Active Joy 的 axes 0／1／3 轉成 Move x／y／yaw；A／B／X／Y 按下事�
 
 Server 狀態與最後輸出 metadata 在同一 Core lock 下複製；Manager 註冊清單使用自己的 lock，註冊可在兩部分取樣間改變。`stamp`／`output_stamp` 使用 ROS clock，與 watchdog 的本地 steady clock 分開；ROS 時間為零時仍可用 `has_output` 判斷是否真的有過輸出。
 
-`SportClient` 的本地擴充 `publishRequest()` 先呼叫 publisher，再同步呼叫 `setRequestObserver()` 設定的 observer；Node 由此紀錄該次真正 request。沒有訂閱共用輸出 topic 來推測來源，所以外部程序的 request 不會覆寫這份狀態。普通資料被去重、request-active 或遭抑制時不更新 output metadata。最後輸出可能是舊 controller 的 StopMove，而 active 已換成另一個 controller；這是刻意區分的兩項資訊，均不表示 robot ACK。
+`SportClient` 的本地擴充 `publishRequest()` 先呼叫 publisher，再同步呼叫 `setRequestObserver()` 設定的 observer；Node 由此紀錄該次真正 request。沒有訂閱共用輸出 topic 來推測來源，所以外部程序的 request 不會覆寫這份狀態。被去重或遭抑制而未發布 request 的輸入不更新 output metadata。request-active 本身不轉成 Move，但成功換手所發布的 StopMove 仍更新紀錄。最後輸出可能是舊 controller 的 StopMove，而 active 已換成另一個 controller；這是刻意區分的兩項資訊，均不表示 robot ACK。
 
 以下為讀取／觀察命令，名稱依實際 namespace 調整：
 
@@ -327,7 +327,7 @@ ros2 run rv2_server_control control_server --ros-args \
 
 依賴基線與介面來源：
 
-- [既有 R1 transport services](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/srv)、[既有 descriptor/status](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/msg)。本次 `ControlServerStatus.msg`、`ControlServerStatusReq.srv`、`SwitchControllerReq.srv`、`ResetInterruptReq.srv` 來自 interfaces 新候選，以上舊版本連結不含這四個型別。
+- Interfaces v0.1.3 候選 `34e5d1ec3aa142f481d6cc09875dc1c4f1101780` 的 [msg](https://github.com/cocobird231/r1_interfaces/tree/34e5d1ec3aa142f481d6cc09875dc1c4f1101780/msg) 與 [srv](https://github.com/cocobird231/r1_interfaces/tree/34e5d1ec3aa142f481d6cc09875dc1c4f1101780/srv)，包含新增的 `ControlServerStatus.msg`、`ControlServerStatusReq.srv`、`SwitchControllerReq.srv`、`ResetInterruptReq.srv`。這是尚未合併的精確開發依賴，不是已合併 project snapshot。
 - [ControlSignalManager](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_manager.h)、[ControlSignalSink](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_sink.h)、[CSM Master](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/csm_master.h)。
 - [R1 bridge 預設設定](https://github.com/cocobird231/rv2_csm_topic_bridge/blob/78ba1a94825eb9790f23a3be5dbfb31df5162ec7/config/topic_bridge.yaml)。
 - Jazzy 標準服務：[parameter services](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/parameter_service.cpp)、[type-description service](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/node_interfaces/node_type_descriptions.cpp)。
