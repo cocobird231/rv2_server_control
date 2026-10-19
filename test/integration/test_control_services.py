@@ -232,7 +232,7 @@ class TestControlServices(unittest.TestCase):
             self.data_clients[name] = (service, client)
 
     def send(self, name, message):
-        """A data-service reply fences the production receive callback."""
+        """Fence the production receive callback with a data-service reply."""
         service, client = self.data_clients[name]
         request = service.Request()
         request.data = message
