@@ -2,6 +2,8 @@
 
 接收最新 `rv2_control_signal_transport` 的 R1 Joy／Twist sources，仲裁 active channel，將變化轉為 `/api/sport/request` 的 Unitree sport requests。控制描述與 service 完全使用 `r1_interfaces`，不依賴 legacy `rv2_interfaces` package。
 
+現行 services、控制器切換與優先權規則，見 [Control Server 架構文件](docs/control_server_architecture.md)，內含資料流、仲裁範例、急停／跨型別行為及查詢方式。
+
 ## 啟動與實機觀察
 
 建置並 source workspace 後，開三個終端：
