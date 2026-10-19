@@ -201,7 +201,9 @@ TEST_F(ServerIntegration, Priority100IsNormalAndOwnershipIsExclusiveAcrossTypes)
                           }));
     EXPECT_EQ(server_->getActiveSink<Joy>(), channel("joy"));
     EXPECT_EQ(stops_, 0);
-    auto twist = add("twist", 50, 3000, 0, "twist");
+    // Service replies fence every receive callback before the switch. A topic
+    // stream may still have legitimate queued packets arriving after selection.
+    auto twist = add("twist", 50, 3000, 0, "twist", "service");
     Twist message;
     message.linear.x = 0.3;
     ASSERT_TRUE(sendUntil(twist,
@@ -225,6 +227,80 @@ TEST_F(ServerIntegration, Priority100IsNormalAndOwnershipIsExclusiveAcrossTypes)
                           {
                               return twistOutputs_ > 0;
                           }));
+}
+
+TEST_F(ServerIntegration, TwistTopicInterruptResetAndSameValueRecoveryDoNotReplayPausedInput)
+{
+    auto converter = std::make_shared<rv2_interfaces::rv2_server_control::OutputMessageConverter>();
+    auto converted = std::make_shared<std::atomic<int>>(0);
+    resetHook_ = [converter]
+    {
+        converter->reset();
+    };
+    Server::TypeConfig<Twist> config;
+    config.outputCb = [converter, converted](const Twist& message, const transport::ControlSignalInfo& info)
+    {
+        if (converter->convert(info.channel_name, message))
+            ++*converted;
+    };
+    config.emergencyStopCb = [this, converter](const transport::ControlSignalInfo&)
+    {
+        ++twistStops_;
+        converter->reset();
+    };
+    config.activeChangedCb = [converter](const std::string&)
+    {
+        converter->reset();
+    };
+    server_->registerTypeConfig(std::move(config));
+    auto source = add("twist_topic", 50, 300, 0, "twist", "topic");
+    Twist message;
+    message.linear.x = 0.4;
+    message.angular.z = -0.2;
+    ASSERT_TRUE(sendUntil(source,
+                          message,
+                          [&]
+                          {
+                              return converted->load() == 1;
+                          }));
+    EXPECT_EQ(server_->getActiveSink<Twist>(), channel("twist_topic"));
+    EXPECT_TRUE(server_->getActiveSink<Joy>().empty());
+    ASSERT_TRUE(server_->interrupt());
+    EXPECT_EQ(interruptionStops_, 1);
+    ASSERT_EQ(source.send(message), transport::SendResult::OK);
+
+    // Stop publishing and observe actual transport inactivity before reset;
+    // this separates cached-data replay from ordinary queued topic delivery.
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return server_->csm().getSinkState(source.controllerName()) == transport::ControlSignalState::TIMEOUT;
+        }));
+    EXPECT_EQ(converted->load(), 1);
+    EXPECT_EQ(twistStops_, 0);
+    server_->resetInterrupt();
+    std::this_thread::sleep_for(100ms);
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    EXPECT_EQ(converted->load(), 1);
+    EXPECT_EQ(interruptionStops_, 1);
+    ASSERT_TRUE(sendUntil(source,
+                          message,
+                          [&]
+                          {
+                              return converted->load() == 2;
+                          }));
+    EXPECT_EQ(server_->getActiveSink<Twist>(), channel("twist_topic"));
+
+    // Silence after recovery produces one loss stop and no cached movement.
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return twistStops_ == 1;
+        }));
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    std::this_thread::sleep_for(150ms);
+    EXPECT_EQ(converted->load(), 2);
+    EXPECT_EQ(twistStops_, 1);
 }
 
 TEST_F(ServerIntegration, RequestActiveRequiresHigherPriorityAndIsNotOutput)

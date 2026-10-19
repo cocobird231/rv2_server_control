@@ -88,9 +88,9 @@ def test_mixed_providers_are_selected_independently(
         root / "installed" / name if choices[name] == "underlay" else None
     )
     command, providers = wrapper.build_command([root], [])
-    roots = command[
-        command.index("--base-paths") + 1 : command.index("--packages-up-to")
-    ]
+    first_root = command.index("--base-paths") + 1
+    package_selection = command.index("--packages-up-to")
+    roots = command[first_root:package_selection]
     assert roots == [
         str(root),
         *(
