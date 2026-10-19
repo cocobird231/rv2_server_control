@@ -1,15 +1,15 @@
 # Control Server 現行架構、服務與控制權仲裁
 
-查核日期：2026-10-19。本文描述 `rv2_server_control` R1 v0.1.1，已合併 `r1` commit `38cfa0f233eb1343e77b54ae97790d01171118fc`；程式內容與原 v0.1.1 tag `c3a2794` 相同。依賴基線為 transport v0.2.0／`5a91d31`、`r1_interfaces` v0.1.2／`a0530d7`。
+查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 使用 `r1_interfaces` 的新候選版本，尚未合併，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表新版本已發布或已完成實機驗收。
 
 ## 1. 目前行為摘要
 
-- Server 接收已註冊來源的 Joy／Twist，在**同一種訊息型別內**選一個 active channel，再轉成 Unitree sport request。
+- Server 接收已註冊來源的 Joy／Twist，兩種型別共同競爭**一個全域 active controller**，再轉成 Unitree sport request。
 - 健康的 active 不會被較高 priority 的**普通資料**搶走。較高 priority 的來源要送 **request-active 訊號**才會接管；相等 priority 不可接管。
-- 普通收訊／watchdog 發現 active 不可用時，選 priority 最高的可用來源，同分依 channel 字典順序選擇；request-active 在沒有可用 active 時則直接選請求者。
-- **目前沒有切換 controller 的 ROS service。** `setActiveSink<T>()` 是 C++ API，production node 沒有把它包成 RPC。
-- **急停不比較 priority，也不限 active 來源；沒有鎖存。** 收到後發 StopMove，其他可用來源之後仍可能輸出運動命令。
-- **Joy 與 Twist 沒有共同的全域控制權仲裁。** 兩者可各自有 active，最後都寫入同一個 `/api/sport/request`。
+- 普通收訊／watchdog 發現 active 不可用時，跨型別選 priority 最高的可用來源，同分先依 channel、再依 type 字典順序選擇；request-active 在沒有可用 active 時則直接選請求者。
+- 三個操作服務提供狀態查詢、依 `controller_name` 手動切換，以及明確解除 wireless interrupt。手動 RPC 要求來源同時為 transport `ACTIVE` 與本地可用，不比較 priority。
+- R2／Twist sentinel 急停仍不比較 priority、也不限 active 來源；這條路徑本身不鎖存。它與 wireless interrupt、active Joy 的 X 按鍵 StopMove 是不同操作。
+- `/wirelesscontroller` 的**每一封** `unitree_go/msg/WirelessController`，包括全零與重複訊息，都觸發全域 interrupt latch。首次鎖定發布一次 StopMove；鎖定期間抑制 server 所有後續控制輸出，直到明確 reset。
 
 下文的「active」指 server 選中的控制來源；R1 status 的 `STATE_ACTIVE` 只表示訊號存活，兩者不能混用。
 
@@ -20,10 +20,17 @@ flowchart LR
     J["joy_node /joy"] --> B["topic bridge / Source Manager"]
     O["其他 Joy / Twist Source Manager"] --> M
     B -->|"註冊描述 + 控制資料"| M["ControlSignalManager / 動態 Sink"]
-    M --> A["ControlServer：每 type 選 active channel"]
+    M --> A["ControlServer Core：Joy/Twist 全域單一 owner"]
     A --> C["OutputMessageConverter"]
     C --> S["SportClient"]
     S --> R["/api/sport/request"]
+    I["/wirelesscontroller：每封訊息"] --> L["interrupt latch"]
+    L -->|"抑制控制輸出"| A
+    L -->|"未鎖定→鎖定：一次 StopMove"| S
+    Q["switch_controller / reset_interrupt"] --> A
+    S -. "本地 publish observer" .-> T["最後實際輸出狀態"]
+    A -. "owner / interrupted / registered" .-> T
+    T --> U["control_server_status service"]
     W["watchdog：預設 50 ms"] --> A
     M -. "register / heartbeat / status" .-> X["獨立 CSM Master"]
     B -. "register / heartbeat / status" .-> X
@@ -33,20 +40,45 @@ flowchart LR
 
 | 組件 | 目前責任 | 主要實作 |
 |---|---|---|
-| `ControlServerNode` | 讀取參數、建立 server、註冊 Joy／Twist callbacks，連接 Unitree 輸出與 log | [control_server.cpp](../src/control_server.cpp) |
+| `ControlServerNode` | 讀取參數、建立三個操作服務與 wireless subscription，連接 Joy／Twist、Unitree 輸出及狀態紀錄 | [control_server.cpp](../src/control_server.cpp) |
 | R1 `ControlSignalManager` | 管理來源註冊、建立 Sink、接收資料、追蹤存活狀態、與 master 對帳 | transport 的 `r1/control_signal_manager.h` |
-| `ControlServer` | 記錄每個 channel 最近收訊時間、選 active、處理 request-active／急停／失聯 | [control_server.h](../include/rv2_server_control/control_server.h) |
+| `ControlServer` | 記錄各 channel 收訊、跨型別選單一 active、處理急停／失聯、wireless latch 與手動操作 | [control_server.h](../include/rv2_server_control/control_server.h) |
 | `OutputMessageConverter` | 將 active 的普通訊息轉為動作，保存 Joy 按鍵與速度去重狀態 | [output_message_convert.h](../include/rv2_server_control/output_message_convert.h) |
-| `SportClient` | 發布 `unitree_api/msg/Request`，例如 Move、StopMove | [sport client](../thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp) |
+| `SportClient` | 發布 `unitree_api/msg/Request`，本地 observer 在 publish 成功返回後紀錄該 request | [sport client](../thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp) |
 | CSM Master | 偵測 Manager 存活與兩端註冊不一致，通知相關 Manager；不選擇機器人的 active controller | transport 的 `r1/csm_master.h` |
 
-Transport 傳遞 priority，但不替 consumer 仲裁；選擇政策在 `ControlServer`。Core mutex 會序列化收訊仲裁、watchdog 與 output callbacks，callback 應保持簡短且不阻塞。
+Transport 傳遞 priority，但不替 consumer 仲裁；選擇政策在 `ControlServer`。Core mutex 序列化收訊仲裁、watchdog、interrupt／reset／switch 與 output callbacks，callback 應保持簡短且不阻塞。訊息型別仍各自保存 records 與轉換 callback，控制權則只有一個。
 
 [Production launch](../launch/control_server.launch.py) 預設另外啟動一個 master；已有 master 時用 `start_master:=false`。直接 `ros2 run rv2_server_control control_server` 不會啟動 master。
 
 ## 3. 目前提供哪些 services
 
-### 3.1 Server 固定持有的 R1 管理服務
+### 3.1 Control Server 操作服務
+
+三個名稱皆由 `config.name`（`server_name` 參數）加上後綴組成。預設 prefix 是相對名稱，會套用 node namespace；以下列出根 namespace 的結果。若 `server_name` 以 `/` 開頭則為絕對名稱，ROS remapping 仍有效。
+
+| 預設 service | 型別 | Request／結果 |
+|---|---|---|
+| `/control_server/control_server_status` | `r1_interfaces/srv/ControlServerStatusReq` | 空 request；回覆 `response`、`reason`、`status` |
+| `/control_server/switch_controller` | `r1_interfaces/srv/SwitchControllerReq` | `string controller_name`；依 R1 主鍵選擇，回覆 `response`、`reason` |
+| `/control_server/reset_interrupt` | `r1_interfaces/srv/ResetInterruptReq` | 空 request；解除 wireless latch，回覆 `response`、`reason` |
+
+Status／reset 的結果碼均為 `RESPONSE_SUCCESS=0`、`RESPONSE_ERROR=1`。Switch 使用以下 typed results；程式應看 `response`，不應解析診斷文字 `reason`。
+
+| Switch 結果 | 值 | 意義 |
+|---|---|---|
+| `RESPONSE_SUCCESS` | 0 | 指定來源已選中；不表示已輸出或機器人已完成動作 |
+| `RESPONSE_NOT_FOUND` | 1 | 此 controller 不在已註冊 Sink 清單 |
+| `RESPONSE_NOT_ACTIVE` | 2 | 尚無可用收訊紀錄、資料過期／blocked，或 transport 尚非 `ACTIVE` |
+| `RESPONSE_UNSUPPORTED_TYPE` | 3 | 已註冊型別沒有 server output handler |
+| `RESPONSE_INTERRUPTED` | 4 | Wireless latch 尚未解除 |
+| `RESPONSE_ERROR` | 5 | Server 無法完成操作或發生例外 |
+
+手動切換可選較低 priority，也可在 Joy／Twist 間換手。拒絕不改 active 或觸發輸出；成功換手依一般換手規則停止舊輸出，等待新 owner 的下一封普通資料。已選中的有效 controller 可再次成功選擇，不重播資料。
+
+Reset 在未鎖定時也是成功，且不更動既有正常控制。從鎖定狀態 reset 時清除 server 的各 type 收訊紀錄、active 與 converter 狀態，不發任何 request，也不取消 R1 註冊；恢復需有新的資料 callback。後續任何 wireless callback 都可再次鎖定，沒有「全零代表解除」或等待按鍵放開的例外。
+
+### 3.2 Server 固定持有的 R1 管理服務
 
 以下以根 namespace、`server_name=control_server` 為例。程式使用 `<server_name>/...`；預設是相對名稱，會加上 node namespace。若 `server_name` 以 `/` 開頭則為絕對名稱，不再前置 namespace；ROS remapping 仍可改變最終名稱。
 
@@ -64,7 +96,7 @@ Info 查詢通常會看到 server 的 `sink_list`；production node 沒有建立
 
 `CsmNotify` 的 request 包含通知 `kind`、`peer_csm_health`、`event_id`、目標 incarnation 與 `EntryStatus[] entries`。通知種類為 STATE、CSM_TIMEOUT、DISCONNECTED、PAIR_MISSING；response 為 APPLIED、ALREADY_APPLIED、STALE、REJECTED 與 reason。這是生命週期協調，不是指定 active controller 的命令。
 
-### 3.2 依 channel 動態建立的資料服務
+### 3.3 依 channel 動態建立的資料服務
 
 | Source descriptor | Server 建立的 endpoint | Request／response |
 |---|---|---|
@@ -76,7 +108,7 @@ Info 查詢通常會看到 server 的 `sink_list`；production node 沒有建立
 
 R1 bridge 預設 `controller_name=local_xbox`、`channel_name=topic_bridge_control`、`csm_mode=topic`、priority 80。因此 `/topic_bridge_control` 預設是資料 topic，不能當資料 service 呼叫。Server 也不會直接訂閱 `/joy`；bridge 先讀 `/joy`，再經已註冊的 channel 轉送。
 
-### 3.3 Master 與 ROS 標準服務
+### 3.4 Master 與 ROS 標準服務
 
 | Service | 型別 | 持有者／用途 |
 |---|---|---|
@@ -97,7 +129,7 @@ Jazzy standalone node 使用預設 NodeOptions 時，另有下列標準服務：
 
 R1 管理端點 prefix 由 `server_name` 決定，標準服務 prefix 則來自 **ROS node 名稱**。改 `server_name` 不會自動改 node name。Master 的 R1 prefix 預設 `csm_master`，它自己的 node name 是 `csm_master_node`。使用 component container 時，還可能看到 container 自己的服務；logger services 並非 NodeOptions 預設啟用項目。
 
-目前 production node 沒有 `ControlServerReq`、set-active、get-active、修改 priority 或解除鎖存急停的專用 ROS service。標準參數服務不能替代它們：server 設定在建構時讀取，沒有將參數變更套用到仲裁狀態的 callback。`set_parameters` 成功不表示 Manager 已重建或控制權已切換。
+本版操作使用 §3.1 的三個具名服務，不使用 legacy `ControlServerReq`，也沒有修改 priority 的專用 service。標準參數服務不代替操作服務：server 設定在建構時讀取，沒有將參數變更套用到仲裁狀態的 callback。`set_parameters` 成功不表示 Manager 已重建或控制權已切換。
 
 ## 4. controller、channel、priority 分別代表什麼
 
@@ -106,7 +138,7 @@ R1 `ControlSignalInfo` 有八個欄位：
 | 欄位 | 在目前 server 的用途 |
 |---|---|
 | `controller_name` | Manager 查找 Sink、識別來源的 key |
-| `channel_name` | 真正資料 topic／service 名稱，也是 server 每個 type 的 records／active key |
+| `channel_name` | 真正資料 topic／service 名稱，也是每個 type 的 record key；全域 owner 由 `(type, channel)` 識別 |
 | `target_manager_name` | 接收註冊的 Manager；預設 `control_server` |
 | `mode` | `topic` 或 `service` |
 | `type` | 訊息型別 key；production node 處理 `joy` 與 `twist` 的動作輸出 |
@@ -114,7 +146,7 @@ R1 `ControlSignalInfo` 有八個欄位：
 | `timeout_ns` | 控制資料過期門檻；server 按本地最後收訊時間檢查 |
 | `disconnect_timeout_ns` | Transport 判定端點終止並移除的門檻 |
 
-每個來源應使用不同的 controller／channel 名稱。`getActiveSink<T>()` 回傳 **channel_name**；`setActiveSink<T>(channel)` 也接受 channel 名稱。預設 bridge 的 controller 與 channel 分別是 `local_xbox`、`topic_bridge_control`。
+每個來源應使用不同的 controller／channel 名稱。RPC `switch_controller` 接受 **controller_name**。既有 C++ `getActiveSink<T>()` 仍回傳 **channel_name**，但只有全域 owner 的 type 符合 `T` 時才非空；`setActiveSink<T>(channel)` 接受 channel，成功時會取代任何 type 的 owner。此 C++ API 保留 `usable()` 的可用性規則，容許剛收訊後尚未更新為 ACTIVE 的 INITIAL／TIMEOUT；RPC 額外嚴格要求 transport ACTIVE。兩者都不能越過 wireless latch。預設 bridge 的 controller 與 channel 分別是 `local_xbox`、`topic_bridge_control`。
 
 Priority 是來源註冊描述的一部分。Server 沒有載入 `requester_priority.yaml`，也沒有 LOCAL／REMOTE 類別上限、95–99 保留區或 priority 100 急停特權。它不要求不同來源的 priority 互異。變更 priority 需由來源端更新描述／註冊流程；對同一 identity 重送 REGISTER 不是修改 priority 的 RPC。
 
@@ -122,11 +154,11 @@ Priority 是來源註冊描述的一部分。Server 沒有載入 `requester_prio
 
 `registerTypeConfig<T>()` 安裝的 callback 依序執行：
 
-1. 取得 `controller_name` 對應的 Sink handle；無效或已 DISCONNECTED 就忽略。
-2. 更新該 channel 的描述、handle 與本地收訊時間，先清除它之前的 `blocked` 標記。同名端點重建時另外清理舊輸出狀態。
-3. **先判斷急停**：將發送者設為 blocked，從其餘可用來源重新選 active，發 StopMove，結束此封訊息。
+1. 檢查 callback 進入時保存的 reset generation；如果等待 Core lock 期間已經 reset，丟棄此 callback。再取得 `controller_name` 對應的 Sink handle；無效或已 DISCONNECTED 就忽略。
+2. 更新該 channel 的描述、handle 與本地收訊時間，清除之前的 `blocked`。若 wireless latch 已鎖定便結束，不執行急停／request-active／普通輸出；未鎖定時，同名 active 端點重建另外清理舊輸出狀態。
+3. **先判斷 R2／sentinel 急停**：將發送者設為 blocked，跨型別從其餘可用來源重新選 active，發 StopMove，結束此封訊息。
 4. **再判斷 request-active**：無可用 active 就直接選請求者；有則只有請求者 priority 嚴格較高才切換。無論成功與否，此封都不進入普通動作轉換。
-5. **最後處理普通資料**：若 active 不可用，先選最高 priority 的可用候選；只有這封的 channel 正是 active，才呼叫 output callback。
+5. **最後處理普通資料**：若 active 不可用，跨型別選最高 priority 的可用候選；只有這封的 `(type, channel)` 正是全域 owner，才呼叫 output callback。
 
 非 active 的普通資料仍會刷新自身收訊紀錄，讓它成為可用 fallback；只是不送到機器人。沒有 active 時，第一封可用普通資料通常就取得控制權，不必等所有來源都註冊後再選全體最高 priority。
 
@@ -145,6 +177,8 @@ Joy request-active 是持續按住的電平判斷，不是按下邊緣。持續�
 
 `usable()` 要求：未 blocked、handle 有效、狀態非 DISCONNECTED，且未超過本地最後收訊時間加 `timeout_ns`。它不要求 Manager 狀態剛好等於 `STATE_ACTIVE`：Manager 在自己的 tick 更新狀態，新資料到達時 status 可能暫時仍是 INITIAL／TIMEOUT。
 
+自動仲裁因此能立即處理第一封資料；手動 `switch_controller` 則必須同時通過上述檢查與 transport ACTIVE，且紀錄描述仍符合目前註冊內容。註冊已成功但尚未收到資料的 controller 會出現在 status 清單，切換仍回 `RESPONSE_NOT_ACTIVE`。
+
 `timeout_ns=0` 停用資料 timeout；R1 service mode 不接受 0，topic mode 才可使用。`disconnect_timeout_ns=0` 停用自動斷線移除。兩門檻都從最後活動時間計算；非零 disconnect 必須大於非零 timeout。
 
 ## 6. 切換條件與優先權範例
@@ -154,13 +188,16 @@ Joy request-active 是持續按住的電平判斷，不是按下邊緣。持續�
 | 無可用 active，收到普通資料 | 在已有新鮮紀錄中挑最高 priority | 若本封來自選中的 channel，就進入 output callback |
 | Active 健康，其他來源送普通資料 | 保持原 active，即使來訊 priority 較高 | 只更新候選紀錄 |
 | 收到 request-active | 無可用 active 就選請求者；有則必須嚴格較高 priority | 換手先停止舊輸出，再等新 owner 的普通資料 |
-| Watchdog 發現 active 過期／失效 | 最高 priority 可用候選；同分按 channel 字典順序；沒有則清空 | 停止舊輸出，不重播候選最後一封資料 |
-| C++ `setActiveSink<T>(channel)` | 同 type 的指定 channel 可用即可，**不比較 priority** | 可手動選較低 priority；成功換手後等其新普通資料 |
-| 收到急停 | 封鎖發送者，再選最高 priority 的其他可用候選 | 直接發 StopMove，該封不送普通輸出 |
+| Watchdog 發現 active 過期／失效 | 跨型別最高 priority；同分依 channel、再依 type 字典順序；沒有則清空 | 停止舊輸出，不重播候選最後一封資料 |
+| RPC `switch_controller` | 指定 controller 已註冊、支援型別、transport ACTIVE 且本地可用；不比較 priority | 可選較低 priority 或另一 type；換手後等新普通資料 |
+| C++ `setActiveSink<T>(channel)` | 指定 type／channel 可用即可；不比較 priority | 取代全域 owner，保留比 RPC 寬鬆的首次收訊規則 |
+| 收到 R2／sentinel 急停 | 封鎖發送者，再跨型別選其他可用候選 | 直接發 StopMove，該封不送普通輸出 |
+| 收到 wireless 訊息 | 清空全域 owner 並鎖存 interrupted | 只有未鎖定→鎖定時發一次 StopMove，鎖定期間其餘輸出皆抑制 |
+| `reset_interrupt` | 已鎖定時清除 server 紀錄與 latch，R1 註冊保留 | 不發輸出，不重播；未鎖定時保持原狀 |
 
-一般換手時，若舊來源曾進入 output callback，`stopPrevious()` 會先發一次 StopMove，再更新 active、清除 converter 狀態。切換本身不重播快取命令。切到相同 channel 時一般不重複換手；同名端點重建另有狀態清理流程。
+一般換手時，若舊來源曾進入 output callback，`stopPrevious()` 會先發一次 StopMove，再更新 active、清除 converter 狀態。切換本身不重播快取命令。切到相同 `(type, channel)` 時一般不重複換手；同名端點重建另有狀態清理流程。
 
-`hadOutput` 記錄是否曾進入 output callback，不是 robot 是否實際收到 Move。即使 converter 因零值／同值去重而沒有發布，後續失聯仍可能 StopMove。
+內部 `hadOutput` 記錄是否曾進入 output callback，用來決定失聯／換手的停止邊緣。即使 converter 因零值／同值去重而沒有發布，後續失聯仍可能 StopMove。它不同於公開 status 的 `has_output`：後者只有真實 publish 才設為 true，且會保留最後輸出歷史。
 
 以下來源都是 Joy，候選資料尚未過期；數字僅示範規則，並非內建角色表。
 
@@ -172,19 +209,27 @@ Joy request-active 是持續按住的電平判斷，不是按下邊緣。持續�
 | C priority 80 對健康的 B priority 80 送 request-active | 不切換，必須嚴格較高 |
 | B 失聯，A priority 20 與 C priority 80 仍有新鮮資料 | 選 C；不是恢復最早取得控制權的 A |
 | B 失聯，`alpha` 與 `beta` 同 priority 且可用 | 選 `alpha`，比較的是 channel 名稱 |
-| 程式對可用的 A 呼叫 `setActiveSink<Joy>(A_channel)` | A 可取代較高 priority 的 B；此 API 不是 ROS service |
+| RPC 選擇 ACTIVE 且新鮮的 A，或程式對可用的 A 呼叫 `setActiveSink<Joy>(A_channel)` | A 可取代較高 priority 的 B；兩種入口有不同的 ACTIVE 檢查 |
 
-## 7. 急停、失聯與跨型別的邊界
+跨型別也採相同規則。例如 Joy A priority 20 已控制機器人，Twist B priority 80 的普通資料不會搶權；B 的 request-active 可接管，之後只有 B 的新普通資料能輸出。A 的失聯不會另行打斷健康的 B。若兩個候選同 priority，先比 channel；type 僅在 channel 也相同時決定次序。
 
-**R2／Twist sentinel 急停與「X 按鍵 StopMove」是不同路徑。** R2／sentinel 在 active 篩選前處理，任何有有效端點的來源都能觸發，不比較 priority。X 屬於 active Joy 的普通動作轉換；非 active 的 X 不會通過輸出篩選。
+## 7. R2／X、失聯與 wireless 鎖存的邊界
+
+**R2／Twist sentinel 急停與「X 按鍵 StopMove」是不同路徑。** 未被 wireless 鎖定時，R2／sentinel 在 active 篩選前處理，任何有有效端點的來源都能觸發，不比較 priority。X 屬於 active Joy 的普通動作轉換；非 active 的 X 不會通過輸出篩選。
 
 X 的 StopMove 不切換 active，也不重設速度去重狀態。因此按 X 停止後，如果後續速度值完全相同，未必會重新發布 Move；不能把它等同於仲裁急停後的同值恢復流程。
 
-急停將發送者 blocked 並重新選候選，也可能把控制權從原本健康的低 priority active 轉給待命的高 priority 來源。發送者下一封非急停訊息會解除自己的 blocked；其他選中來源下一封普通訊息也能再次 Move。沒有「必須呼叫解除急停 service 才能恢復」的鎖存狀態。
+R2／sentinel 急停將發送者 blocked 並跨型別重新選候選，也可能把控制權從原本健康的低 priority active 轉給待命的高 priority 來源。發送者下一封非急停訊息解除自己的 blocked；其他選中來源下一封普通訊息也能再次 Move。這條路徑不設 wireless latch，無須 reset service。
 
-每一封明確急停都執行 stop callback，連續急停可能連續發 StopMove。「只停一次」指失聯後沒有新的輸出活動時，不在每個 watchdog tick 重複停止。
+未被 wireless 鎖定時，每一封 R2／sentinel 急停都執行 stop callback，連續急停可能連續發 StopMove。失聯則在沒有新的輸出活動時，不會於每個 watchdog tick 重複停止；wireless 的一次停止以 latch 的未鎖定→鎖定邊緣計算。
 
-Joy 與 Twist 各有 active，但共用 SportClient 與輸出 topic。Joy priority 80 不會壓過 Twist priority 20；兩者都可能輸出。一種 type 的失聯／急停向共用輸出發 StopMove，卻不取消另一 type 的 active，另一 type 之後仍可 Move。仲裁的 stop callback／activeChanged callback 也會清空同一 converter 內 **Joy 與 Twist 全部**去重狀態。這些是目前實作行為，不是全域單一 owner 或全域鎖存急停。
+Wireless subscription 使用 `rclcpp::SensorDataQoS()`，即 best-effort、volatile、keep-last 5；可接收 best-effort 或 reliable publisher。型別固定為 `unitree_go/msg/WirelessController`，不是 `unitree_hg/msg/LowState` 的 raw `wireless_remote` 陣列。預設 topic 是 `/wirelesscontroller`，可透過啟動參數 `wireless_topic` 改名。
+
+Callback 不檢查 lx／ly／rx／ry／keys 的值，也不做邊緣或重複內容過濾。**全零、持續相同內容、沒有按鍵的訊息都會鎖定。** 第一次鎖定先設 interrupted、清空 owner 與轉換狀態，再發布一次 StopMove；該輸出的 `output_controller_name` 為空。即使尚未有控制器輸出也會停止。已鎖定期間重複 wireless 訊息不重複 StopMove；Joy／Twist 的普通資料、request-active、R2／sentinel、watchdog 與手動切換都不再產生控制輸出。
+
+Reset 本身不發 Move 或 StopMove，不清除最後實際輸出的 metadata。它清空 server 已保存的收訊紀錄，並拒絕在 reset 前已進入、但等待 Core lock 的舊 callback。**它不清空 DDS 佇列**：reset 後才開始執行的 callback 仍被視為新 callback，其資料可能早已由 publisher 送出；目前無 producer sequence／age gate 保證資料是在 reset 後產生。若 wireless 持續發布，即使持續全零，下一封 callback 仍會再次鎖定；需要停止該資料流後再 reset，才能保持解除狀態。
+
+一般換手、仲裁 stop callback、wireless interrupt／reset 會清空 Joy 與 Twist 全部 converter 狀態。上述仲裁與抑制只約束本 server 的輸出；其他直接發布 `/api/sport/request` 的程序不受此 latch 控制。
 
 ## 8. 時間設定與輸出
 
@@ -194,6 +239,7 @@ Joy 與 Twist 各有 active，但共用 SportClient 與輸出 topic。Joy priori
 | `status_timer_interval_ms` | 100 ms | R1 Manager tick／status 週期 |
 | `csm_timeout_ms` | 600 ms | Master 判斷本 Manager heartbeat 過期並標記 TIMEOUT 的門檻，不是 Joy 資料 timeout |
 | `csm_disconnect_timeout_ms` | 6000 ms | Master 判斷本 Manager 已死亡、通知配對 Manager 移除相關端點的門檻 |
+| `wireless_topic` | `/wirelesscontroller` | 每封訊息都觸發 wireless latch 的 subscription 名稱 |
 | Source `timeout_ns` | 來源決定 | 目前 R1 bridge 的 `timeout_ms=2000` |
 | Source `disconnect_timeout_ns` | 來源決定 | 目前 R1 bridge 的 `disconnect_timeout_ms=10000` |
 
@@ -203,7 +249,22 @@ Active Joy 的 axes 0／1／3 轉成 Move x／y／yaw；A／B／X／Y 按下事�
 
 輸出是 `/api/sport/request` 的 `unitree_api/msg/Request` **topic**，不是 ROS service。現行路徑發布命令，不等待機器人完成確認。它是絕對 topic 名稱，替 server 換 namespace 不會自動將 robot 輸出隔離成不同 topic。
 
-## 9. 如何觀察目前狀況
+## 9. 狀態語意與操作命令
+
+`control_server_status` 回覆的 `ControlServerStatus` 包含：
+
+| 欄位 | 意義 |
+|---|---|
+| `stamp`、`server_name` | Node 讀取狀態後填入 ROS clock 時間，以及 server 的設定名稱 |
+| `interrupted`、`active_controller_name` | Wireless latch 與唯一選中的 controller；沒有 owner 時名稱為空 |
+| `registered_controllers` | Manager 的完整已註冊 Sink 描述；包含尚未送資料的來源，不是 Core 收訊 records 的清單 |
+| `has_output` | 此 server 曾實際 publish 過 request；StopMove 後仍為 true，不代表機器人正在移動 |
+| `output_stamp`、`output_controller_name` | 最後本地 publish 的 ROS clock 時間與來源 controller；wireless safety stop 的 controller 為空 |
+| `output_api_id`、`output_parameter`、`output_binary` | 最後實際發布的 API ID、parameter 字串及 binary bytes；`has_output=false` 時不具輸出意義 |
+
+Server 狀態與最後輸出 metadata 在同一 Core lock 下複製；Manager 註冊清單使用自己的 lock，註冊可在兩部分取樣間改變。`stamp`／`output_stamp` 使用 ROS clock，與 watchdog 的本地 steady clock 分開；ROS 時間為零時仍可用 `has_output` 判斷是否真的有過輸出。
+
+`SportClient` 的本地擴充 `publishRequest()` 先呼叫 publisher，再同步呼叫 `setRequestObserver()` 設定的 observer；Node 由此紀錄該次真正 request。沒有訂閱共用輸出 topic 來推測來源，所以外部程序的 request 不會覆寫這份狀態。普通資料被去重、request-active 或遭抑制時不更新 output metadata。最後輸出可能是舊 controller 的 StopMove，而 active 已換成另一個 controller；這是刻意區分的兩項資訊，均不表示 robot ACK。
 
 以下為讀取／觀察命令，名稱依實際 namespace 調整：
 
@@ -212,19 +273,45 @@ ros2 node info /control_server
 ros2 service list -t
 ros2 service call /control_server/control_signal_info_req \
   r1_interfaces/srv/ControlSignalInfoReq '{}'
+ros2 service call /control_server/control_server_status \
+  r1_interfaces/srv/ControlServerStatusReq '{}'
 ros2 topic echo /control_server/status
-ros2 topic echo /api/sport/request
+ros2 topic echo /api/sport/request unitree_api/msg/Request
+```
+
+以下命令會改變控制狀態。`local_xbox` 必須已註冊、transport ACTIVE 且有新鮮資料，手動切換才會成功：
+
+```bash
+ros2 service call /control_server/switch_controller \
+  r1_interfaces/srv/SwitchControllerReq '{controller_name: local_xbox}'
+
+# 全零也會鎖存，並在首次鎖定發送一次 StopMove。
+ros2 topic pub --once --qos-reliability best_effort /wirelesscontroller \
+  unitree_go/msg/WirelessController '{lx: 0.0, ly: 0.0, rx: 0.0, ry: 0.0, keys: 0}'
+
+# 先停止持續的 wireless publisher；reset 後等待新的控制資料 callback。
+ros2 service call /control_server/reset_interrupt \
+  r1_interfaces/srv/ResetInterruptReq '{}'
+```
+
+`ros2 launch rv2_server_control control_server.launch.py` 會使用設定 YAML；已有 master 時加 `start_master:=false`。變更 wireless topic 可修改 `config_file` 指向的 YAML，或直接啟動 node：
+
+```bash
+ros2 run rv2_server_control control_server --ros-args \
+  -p server_name:=control_server -p wireless_topic:=/robot/wirelesscontroller
 ```
 
 | 觀察內容 | 能回答的問題 | 不能直接推論的事情 |
 |---|---|---|
 | Info 的 `sink_list` | 哪些來源已註冊，channel／priority／timeout 為何 | 哪個目前有控制權 |
 | `ManagerStatus.sinks` 的 state／data_rate_hz | 傳輸存活狀態與收訊頻率 | `STATE_ACTIVE` 不等於被選中 |
-| `[R1/joy] active channel: ...`、`[R1/twist] ...` | 各 type 的 active 切換 | 不表示已發布 Move |
+| 操作 status 的 active／interrupted／output 欄位 | 唯一 owner、wireless latch 與最後本地發布內容 | 不表示機器人已執行或仍在移動 |
+| `[R1/joy] active channel: ...`、`[R1/twist] ...` | 全域 owner 切換；跨型別時舊 type 會記為 none | 不表示已發布 Move |
 | `[OUTPUT/joy]`／`[OUTPUT/twist]` | Converter 產生並呼叫輸出命令，可看 controller／channel／priority | 不表示機器人已完成動作 |
 | `[STOP/joy]`／`[STOP/twist]` 與 API 1003 | StopMove 已被呼叫／發布 | 不表示全域控制權被鎖住 |
+| `[INTERRUPTED]` 與 `interrupted=true` | Wireless latch 已鎖定，要求明確 reset | 不表示其他直接發布 robot request 的程序也被禁止 |
 
-嵌入 library 時可用 `getActiveSink<sensor_msgs::msg::Joy>()` 與 `getActiveSink<geometry_msgs::msg::Twist>()` 查詢；production node 沒有額外發布這兩個 active 值。`log_output=false` 關閉一般 OUTPUT log，切換與 STOP log 仍保留。
+嵌入 library 時可用 `getActiveSink<sensor_msgs::msg::Joy>()` 與 `getActiveSink<geometry_msgs::msg::Twist>()` 查詢；兩者至多一個非空。Production node 用操作 status service 回覆 owner，原 `/control_server/status` topic 仍是 R1 `ManagerStatus`，沒有改為新的 status 型別。`log_output=false` 關閉一般 OUTPUT log，切換、STOP 與 INTERRUPTED log 仍保留。
 
 ## 10. 程式與既有測試對照
 
@@ -235,14 +322,14 @@ ros2 topic echo /api/sport/request
 | Output／Stop／activeChanged callbacks 與參數 | [control_server.cpp](../src/control_server.cpp) |
 | Converter reset、Twist 同值去重 | [output_message_convert.h](../include/rv2_server_control/output_message_convert.h) |
 | Joy 按鍵／axes 轉換 | [joy_sport_client_map.h](../include/rv2_server_control/joy_sport_client_map.h) |
-| Type 獨立、priority 100、request-active、fallback、急停與恢復 | [integration tests](../test/integration/test_control_server.cpp) |
+| 跨型別全域仲裁、priority 100、strict switch、interrupt/reset 與 callback fence | [integration tests](../test/integration/test_control_server.cpp) |
 | 編碼邊界、短 Joy arrays、轉換與 reset | [unit tests](../test/unit/test_control_server.cpp) |
 
-固定依賴版本的定義與建立位置：
+依賴基線與介面來源：
 
-- [r1_interfaces srv](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/srv)、[msg](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/msg)。
+- [既有 R1 transport services](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/srv)、[既有 descriptor/status](https://github.com/cocobird231/r1_interfaces/tree/a0530d76cb69a737778ec1b658682837a50a738a/msg)。本次 `ControlServerStatus.msg`、`ControlServerStatusReq.srv`、`SwitchControllerReq.srv`、`ResetInterruptReq.srv` 來自 interfaces 新候選，以上舊版本連結不含這四個型別。
 - [ControlSignalManager](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_manager.h)、[ControlSignalSink](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_sink.h)、[CSM Master](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/csm_master.h)。
 - [R1 bridge 預設設定](https://github.com/cocobird231/rv2_csm_topic_bridge/blob/78ba1a94825eb9790f23a3be5dbfb31df5162ec7/config/topic_bridge.yaml)。
 - Jazzy 標準服務：[parameter services](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/parameter_service.cpp)、[type-description service](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/node_interfaces/node_type_descriptions.cpp)。
 
-本文由目前源碼與既有測試案例整理；引用測試不代表本次重跑。相同 priority 的 fallback 排序、非 active 急停、手動選較低 priority，以及兩種 type 共用機器人輸出的交互行為，係從實作直接推導，現有測試沒有逐項獨立覆蓋。
+本文依目前候選源碼與測試入口整理；引用測試不代表已重跑或已通過。本次 Docker 驗證與實機 joystick／wireless 驗收應分別記錄，不以型別序列化或模擬訊息測試代替硬體結果。
