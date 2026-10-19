@@ -32,11 +32,12 @@ def workspace(wrapper, tmp_path, monkeypatch):
 
 
 def test_workspace_source_precedes_underlay_and_bundle(wrapper, workspace):
-    """A source overlay wins without probing or adding another API provider."""
+    """Source overlays win without probing or adding another Unitree provider."""
     root, sources = workspace
-    sources[wrapper.API] = [root / "external_api"]
+    for name in wrapper.UNITREE_PACKAGES:
+        sources[name] = [root / name]
     wrapper.underlay_prefix.side_effect = AssertionError("source must win")
-    command, provider = wrapper.build_command([root], [])
+    command, providers = wrapper.build_command([root], [])
     assert command == [
         "colcon",
         "build",
@@ -45,46 +46,132 @@ def test_workspace_source_precedes_underlay_and_bundle(wrapper, workspace):
         "--packages-up-to",
         wrapper.SERVER,
     ]
-    assert "workspace source" in provider
+    assert providers == {
+        name: f"workspace source {root / name}" for name in wrapper.UNITREE_PACKAGES
+    }
 
 
 def test_underlay_precedes_bundle(wrapper, workspace):
-    """An already sourced installation avoids rebuilding the vendored API."""
+    """An already sourced installation avoids rebuilding either vendored package."""
     root, _ = workspace
-    wrapper.underlay_prefix.return_value = root / "installed_api"
-    command, provider = wrapper.build_command([root], [])
-    assert str(wrapper.VENDORED_API) not in command
-    assert provider == f"sourced underlay {root / 'installed_api'}"
+    wrapper.underlay_prefix.return_value = root / "installed_unitree"
+    command, providers = wrapper.build_command([root], [])
+    for name in wrapper.UNITREE_PACKAGES:
+        assert str(wrapper.VENDORED_ROOT / name) not in command
+        assert providers[name] == f"sourced underlay {root / 'installed_unitree'}"
+    assert wrapper.underlay_prefix.call_args_list == [
+        unittest.mock.call(name) for name in wrapper.UNITREE_PACKAGES
+    ]
+
+
+@pytest.mark.parametrize(
+    "api_provider, go_provider",
+    [
+        ("source", "underlay"),
+        ("underlay", "source"),
+        ("source", "vendor"),
+        ("vendor", "source"),
+        ("underlay", "vendor"),
+        ("vendor", "underlay"),
+    ],
+)
+def test_mixed_providers_are_selected_independently(
+    wrapper, workspace, api_provider, go_provider
+):
+    """The provider of one package must never hide or override the other's source."""
+    root, sources = workspace
+    choices = dict(zip(wrapper.UNITREE_PACKAGES, (api_provider, go_provider)))
+    for name, choice in choices.items():
+        if choice == "source":
+            sources[name] = [root / name]
+    wrapper.underlay_prefix.side_effect = lambda name: (
+        root / "installed" / name if choices[name] == "underlay" else None
+    )
+    command, providers = wrapper.build_command([root], [])
+    roots = command[
+        command.index("--base-paths") + 1 : command.index("--packages-up-to")
+    ]
+    assert roots == [
+        str(root),
+        *(
+            str(wrapper.VENDORED_ROOT / name)
+            for name, choice in choices.items()
+            if choice == "vendor"
+        ),
+    ]
+    for name, choice in choices.items():
+        if choice == "source":
+            assert providers[name] == f"workspace source {root / name}"
+        elif choice == "underlay":
+            assert providers[name] == f"sourced underlay {root / 'installed' / name}"
+        else:
+            assert providers[name] == f"bundled source {wrapper.VENDORED_ROOT / name}"
+    assert wrapper.underlay_prefix.call_args_list == [
+        unittest.mock.call(name)
+        for name, choice in choices.items()
+        if choice != "source"
+    ]
 
 
 def test_fallback_preserves_paths_and_forwarded_argument_tokens(wrapper, workspace):
-    """Spaces and shell metacharacters remain data, with only API added as a root."""
+    """Preserve shell tokens; add API/Go roots without scanning the vendor parent."""
     root, _ = workspace
     spaced = root / "extra source"
     spaced.mkdir()
     forwarded = ["--symlink-install", "--cmake-args", "-DLABEL=a b;$(false)"]
-    command, provider = wrapper.build_command([root, spaced, root], forwarded)
+    command, providers = wrapper.build_command([root, spaced, root], forwarded)
     assert command == [
         "colcon",
         "build",
         "--base-paths",
         str(root),
         str(spaced),
-        str(wrapper.VENDORED_API),
+        *(str(wrapper.VENDORED_ROOT / name) for name in wrapper.UNITREE_PACKAGES),
         "--packages-up-to",
         wrapper.SERVER,
         *forwarded,
     ]
-    assert "bundled source" in provider
+    assert all("bundled source" in provider for provider in providers.values())
+    assert str(wrapper.VENDORED_ROOT) not in command
+    assert str(wrapper.VENDORED_ROOT / "unitree_hg") not in command
 
 
-@pytest.mark.parametrize("name", ["unitree_api", "rv2_server_control"])
+@pytest.mark.parametrize("name", ["unitree_api", "unitree_go", "rv2_server_control"])
 def test_duplicate_source_packages_fail(wrapper, workspace, name):
     """Ambiguous copies must not silently choose one package."""
     root, sources = workspace
     sources[name] = [root / "copy_a", root / "copy_b"]
     with pytest.raises(ValueError, match=f"Duplicate {name}"):
         wrapper.build_command([root], [])
+    wrapper.underlay_prefix.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["unitree_api", "unitree_go"])
+def test_missing_bundle_fails_without_starting_build(
+    wrapper, workspace, monkeypatch, missing
+):
+    """Missing one required bundle cannot silently produce a partial build plan."""
+    root, sources = workspace
+    for name in wrapper.UNITREE_PACKAGES:
+        if name != missing:
+            sources[name] = [root / name]
+    monkeypatch.setattr(wrapper, "VENDORED_ROOT", root / "missing vendor")
+    build = unittest.mock.Mock()
+    monkeypatch.setattr(wrapper.subprocess, "call", build)
+    assert wrapper.main(["--source-root", str(root)]) == 2
+    build.assert_not_called()
+
+
+def test_underlay_index_failure_is_not_treated_as_missing_package(
+    wrapper, tmp_path, monkeypatch
+):
+    """Only PackageNotFoundError permits fallback; malformed index errors propagate."""
+    monkeypatch.setenv("AMENT_PREFIX_PATH", str(tmp_path))
+    lookup = unittest.mock.Mock(side_effect=ValueError("broken package index"))
+    monkeypatch.setattr(wrapper.ament_packages, "get_package_prefix", lookup)
+    with pytest.raises(ValueError, match="broken package index"):
+        wrapper.underlay_prefix("unitree_go")
+    lookup.assert_called_once_with("unitree_go")
 
 
 @pytest.mark.parametrize(
@@ -145,6 +232,8 @@ def test_dry_run_and_build_exit_status(wrapper, workspace, monkeypatch, capsys):
     args = ["--source-root", str(root)]
     assert wrapper.main([*args, "--dry-run", "--", "--symlink-install"]) == 0
     build.assert_not_called()
-    assert "bundled source" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    for name in wrapper.UNITREE_PACKAGES:
+        assert f"{name}: bundled source" in output
     assert wrapper.main([*args, "--", "--symlink-install"]) == 7
     assert build.call_args.args[0][-1] == "--symlink-install"

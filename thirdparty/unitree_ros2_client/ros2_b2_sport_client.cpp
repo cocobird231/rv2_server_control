@@ -6,37 +6,37 @@
 void SportClient::Damp(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_DAMP;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::BalanceStand(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_BALANCESTAND;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::StopMove(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_STOPMOVE;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::StandUp(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_STANDUP;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::StandDown(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_STANDDOWN;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::RecoveryStand(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_RECOVERYSTAND;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::Move(unitree_api::msg::Request& req, float vx, float vy, float vyaw)
@@ -47,7 +47,7 @@ void SportClient::Move(unitree_api::msg::Request& req, float vx, float vy, float
     js["z"] = vyaw;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_MOVE;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::SwitchGait(unitree_api::msg::Request& req, int d)
@@ -56,7 +56,7 @@ void SportClient::SwitchGait(unitree_api::msg::Request& req, int d)
     js["data"] = d;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_SWITCHGAIT;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 void SportClient::BodyHeight(unitree_api::msg::Request& req, float height)
 {
@@ -64,7 +64,7 @@ void SportClient::BodyHeight(unitree_api::msg::Request& req, float height)
     js["data"] = height;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_BODYHEIGHT;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::SpeedLevel(unitree_api::msg::Request& req, int level)
@@ -73,7 +73,7 @@ void SportClient::SpeedLevel(unitree_api::msg::Request& req, int level)
     js["data"] = level;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_SPEEDLEVEL;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::TrajectoryFollow(unitree_api::msg::Request& req, std::vector<PathPoint>& path)
@@ -93,7 +93,7 @@ void SportClient::TrajectoryFollow(unitree_api::msg::Request& req, std::vector<P
     }
     req.parameter = js_path.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_TRAJECTORYFOLLOW;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::ContinuousGait(unitree_api::msg::Request& req, bool flag)
@@ -102,7 +102,7 @@ void SportClient::ContinuousGait(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_CONTINUOUSGAIT;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::MoveToPos(unitree_api::msg::Request& req, float x, float y, float yaw)
@@ -113,7 +113,7 @@ void SportClient::MoveToPos(unitree_api::msg::Request& req, float x, float y, fl
     js["yaw"] = yaw;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_MOVETOPOS;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::SwitchMoveMode(unitree_api::msg::Request& req, bool flag)
@@ -122,7 +122,7 @@ void SportClient::SwitchMoveMode(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_SWITCHMOVEMODE;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::HandStand(unitree_api::msg::Request& req, bool flag)
@@ -131,7 +131,7 @@ void SportClient::HandStand(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_HANDSTAND;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::VisionWalk(unitree_api::msg::Request& req, bool flag)
@@ -140,7 +140,7 @@ void SportClient::VisionWalk(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_VISIONWALK;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::AutoRecoverySet(unitree_api::msg::Request& req, bool flag)
@@ -149,13 +149,13 @@ void SportClient::AutoRecoverySet(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_AUTORECOVERY_SET;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::FreeWalk(unitree_api::msg::Request& req)
 {
     req.header.identity.api_id = ROBOT_SPORT_API_ID_FREEWALK;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::ClassicWalk(unitree_api::msg::Request& req, bool flag)
@@ -164,7 +164,7 @@ void SportClient::ClassicWalk(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_CLASSICWALK;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::FastWalk(unitree_api::msg::Request& req, bool flag)
@@ -173,7 +173,7 @@ void SportClient::FastWalk(unitree_api::msg::Request& req, bool flag)
     js["data"] = flag;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_FASTWALK;
-    req_puber_->publish(req);
+    publishRequest(req);
 }
 
 void SportClient::Euler(unitree_api::msg::Request& req, float roll, float pitch, float yaw)
@@ -184,5 +184,5 @@ void SportClient::Euler(unitree_api::msg::Request& req, float roll, float pitch,
     js["z"] = yaw;
     req.parameter = js.dump();
     req.header.identity.api_id = ROBOT_SPORT_API_ID_FREEEULER;
-    req_puber_->publish(req);
+    publishRequest(req);
 }

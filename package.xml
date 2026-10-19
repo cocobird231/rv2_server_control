@@ -19,6 +19,7 @@
   <depend>rv2_control_signal_transport</depend>
   <depend>joy_interpreter</depend>
   <depend>unitree_api</depend>
+  <depend>unitree_go</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
