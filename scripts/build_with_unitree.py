@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build this server, preferring workspace or sourced Unitree over bundled API."""
+"""Build this server, selecting each required Unitree package independently."""
 
 import argparse
 import os
@@ -11,10 +11,8 @@ import sys
 from ament_index_python import packages as ament_packages
 
 SERVER = "rv2_server_control"
-API = "unitree_api"
-VENDORED_API = (
-    pathlib.Path(__file__).resolve().parents[1] / "thirdparty/unitree/unitree_api"
-)
+UNITREE_PACKAGES = ("unitree_api", "unitree_go")
+VENDORED_ROOT = pathlib.Path(__file__).resolve().parents[1] / "thirdparty/unitree"
 
 
 def discover_packages(roots):
@@ -32,12 +30,12 @@ def discover_packages(roots):
     return packages
 
 
-def underlay_prefix():
-    """Find the first installed API in the environment the caller has sourced."""
+def underlay_prefix(package):
+    """Find this package in the environment the caller has sourced."""
     if not os.environ.get("AMENT_PREFIX_PATH"):
         return None
     try:
-        return pathlib.Path(ament_packages.get_package_prefix(API))
+        return pathlib.Path(ament_packages.get_package_prefix(package))
     except ament_packages.PackageNotFoundError:
         return None
 
@@ -68,14 +66,14 @@ def validate_build_arguments(arguments):
 
 
 def build_command(source_roots, arguments):
-    """Choose one API provider and construct a dependency-aware colcon command."""
+    """Choose each package's provider and construct a dependency-aware command."""
     validate_build_arguments(arguments)
     roots = list(dict.fromkeys(pathlib.Path(root).resolve() for root in source_roots))
     for root in roots:
         if not root.is_dir():
             raise ValueError(f"Source root does not exist: {root}")
     packages = discover_packages(roots)
-    for name in (SERVER, API):
+    for name in (SERVER, *UNITREE_PACKAGES):
         paths = packages.get(name, [])
         if len(paths) > 1:
             raise ValueError(
@@ -85,15 +83,18 @@ def build_command(source_roots, arguments):
         raise ValueError(
             f"{SERVER} was not discovered; include its source via --source-root"
         )
-    if API in packages:
-        provider = f"workspace source {packages[API][0]}"
-    elif (prefix := underlay_prefix()) is not None:
-        provider = f"sourced underlay {prefix}"
-    else:
-        if not (VENDORED_API / "package.xml").is_file():
-            raise ValueError(f"Bundled {API} is missing: {VENDORED_API}")
-        roots.append(VENDORED_API)
-        provider = f"bundled source {VENDORED_API}"
+    providers = {}
+    for name in UNITREE_PACKAGES:
+        if name in packages:
+            providers[name] = f"workspace source {packages[name][0]}"
+        elif (prefix := underlay_prefix(name)) is not None:
+            providers[name] = f"sourced underlay {prefix}"
+        else:
+            vendor = VENDORED_ROOT / name
+            if not (vendor / "package.xml").is_file():
+                raise ValueError(f"Bundled {name} is missing: {vendor}")
+            roots.append(vendor)
+            providers[name] = f"bundled source {vendor}"
     command = [
         "colcon",
         "build",
@@ -103,7 +104,7 @@ def build_command(source_roots, arguments):
         SERVER,
         *arguments,
     ]
-    return command, provider
+    return command, providers
 
 
 def main(argv=None):
@@ -131,8 +132,9 @@ def main(argv=None):
             parser.error("Pass colcon build options after --")
         arguments = arguments[1:]
     try:
-        command, provider = build_command(options.source_root or ["src"], arguments)
-        print(f"{API}: {provider}", flush=True)
+        command, providers = build_command(options.source_root or ["src"], arguments)
+        for package, provider in providers.items():
+            print(f"{package}: {provider}", flush=True)
         print(shlex.join(command), flush=True)
         if options.dry_run:
             return 0

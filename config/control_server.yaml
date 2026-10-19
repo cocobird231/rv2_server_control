@@ -6,4 +6,5 @@ control_server:
     status_timer_interval_ms: 100
     csm_timeout_ms: 600
     csm_disconnect_timeout_ms: 6000
+    wireless_topic: /wirelesscontroller
     log_output: true

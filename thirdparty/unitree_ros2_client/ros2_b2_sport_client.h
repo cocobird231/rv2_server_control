@@ -3,6 +3,8 @@
 ***********************************************************************/
 #ifndef _ROS2_SPORT_CLIENT_
 #define _ROS2_SPORT_CLIENT_
+#include <functional>
+#include <future>
 #include <iostream>
 #include <rclcpp/rclcpp.hpp>
 
@@ -50,12 +52,27 @@ class SportClient
     rclcpp::Publisher<unitree_api::msg::Request>::SharedPtr req_puber_;
     rclcpp::Subscription<unitree_api::msg::Response>::SharedPtr req_suber_;
     rclcpp::Node* node_;
+    std::function<void(const unitree_api::msg::Request&)> request_observer_;
+
+    void publishRequest(const unitree_api::msg::Request& request)
+    {
+        req_puber_->publish(request);
+        if (request_observer_)
+            request_observer_(request);
+    }
 
 public:
     explicit SportClient(rclcpp::Node* node) :
         node_(node)
     {
         req_puber_ = node_->create_publisher<unitree_api::msg::Request>("/api/sport/request", 10);
+    }
+
+    // Local extension: observe successful local publishes; this is not a robot ACK.
+    // Set before callbacks start; the caller serializes command invocations.
+    void setRequestObserver(std::function<void(const unitree_api::msg::Request&)> observer)
+    {
+        request_observer_ = std::move(observer);
     }
 
     template <typename Request, typename Response> nlohmann::json Call(const Request& req)
@@ -74,7 +91,7 @@ public:
                                                      }
                                                  });
 
-        req_puber_->publish(req);
+        publishRequest(req);
 
         auto response = *response_future.get();
         nlohmann::json js = nlohmann::json::parse(response.data.data());

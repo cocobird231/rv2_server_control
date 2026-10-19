@@ -18,6 +18,7 @@ namespace transport = rv2_interfaces::r1;
 using Server = rv2_interfaces::rv2_server_control::ControlServer;
 using Joy = sensor_msgs::msg::Joy;
 using Twist = geometry_msgs::msg::Twist;
+using SwitchResponse = r1_interfaces::srv::SwitchControllerReq::Response;
 
 namespace
 {
@@ -55,6 +56,17 @@ protected:
         sourceNode_ = std::make_shared<rclcpp::Node>(prefix_ + "_source");
         auto config = serverConfig();
         config.name = prefix_;
+        config.interruptionStopCb = [this]
+        {
+            ++interruptionStops_;
+            server_->recordOutput(sinkNode_->now().to_msg(), "", 1003, "", {});
+        };
+        config.resetOutputCb = [this]
+        {
+            ++resets_;
+            if (resetHook_)
+                resetHook_();
+        };
         server_ = std::make_unique<Server>(sinkNode_.get(), config);
         transport::ManagerOptions options(transport::RetryPolicy(20, 100, 0, 20, 4));
         options.statusIntervalMs = 20;
@@ -174,11 +186,13 @@ protected:
     mutable std::mutex outputMutex_;
     std::vector<std::string> outputs_;
     std::atomic<int> stops_{0}, twistOutputs_{0}, twistStops_{0};
+    std::atomic<int> interruptionStops_{0}, resets_{0};
+    std::function<void()> resetHook_;
 };
 
-TEST_F(ServerIntegration, Priority100IsNormalAndTypesAreIndependent)
+TEST_F(ServerIntegration, Priority100IsNormalAndOwnershipIsExclusiveAcrossTypes)
 {
-    auto source = add("joy", 100);
+    auto source = add("joy", 100, 3000);
     ASSERT_TRUE(sendUntil(source,
                           joy(),
                           [&]
@@ -187,17 +201,30 @@ TEST_F(ServerIntegration, Priority100IsNormalAndTypesAreIndependent)
                           }));
     EXPECT_EQ(server_->getActiveSink<Joy>(), channel("joy"));
     EXPECT_EQ(stops_, 0);
-    auto twist = add("twist", 50, 600, 0, "twist");
+    auto twist = add("twist", 50, 3000, 0, "twist");
     Twist message;
     message.linear.x = 0.3;
     ASSERT_TRUE(sendUntil(twist,
                           message,
                           [&]
                           {
-                              return twistOutputs_ > 0;
+                              return server_->csm().getSinkState(twist.controllerName()) ==
+                                     transport::ControlSignalState::ACTIVE;
                           }));
     EXPECT_EQ(server_->getActiveSink<Joy>(), channel("joy"));
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    EXPECT_EQ(twistOutputs_, 0);
+    ASSERT_EQ(server_->switchController(twist.controllerName()), SwitchResponse::RESPONSE_SUCCESS);
+    EXPECT_TRUE(server_->getActiveSink<Joy>().empty());
     EXPECT_EQ(server_->getActiveSink<Twist>(), channel("twist"));
+    EXPECT_EQ(stops_, 1);
+    EXPECT_EQ(twistOutputs_, 0);  // manual selection never replays its cached data
+    ASSERT_TRUE(sendUntil(twist,
+                          message,
+                          [&]
+                          {
+                              return twistOutputs_ > 0;
+                          }));
 }
 
 TEST_F(ServerIntegration, RequestActiveRequiresHigherPriorityAndIsNotOutput)
@@ -280,11 +307,13 @@ class FirstPacketServer : public ServerIntegration
 TEST_F(FirstPacketServer, OneServicePacketArmsLossEdgeBeforeStateTick)
 {
     auto stateAtReceive = std::make_shared<std::atomic<int>>(-1);
+    auto switchResult = std::make_shared<std::atomic<int>>(-1);
     Server::TypeConfig<Joy> config;
-    config.outputCb = [this, stateAtReceive](const Joy&, const transport::ControlSignalInfo& info)
+    config.outputCb = [this, stateAtReceive, switchResult](const Joy&, const transport::ControlSignalInfo& info)
     {
         const auto state = server_->csm().getSinkState(info.controller_name);
         stateAtReceive->store(state ? static_cast<int>(*state) : -1);
+        switchResult->store(server_->switchController(info.controller_name));
     };
     config.emergencyStopCb = [this](const transport::ControlSignalInfo&)
     {
@@ -309,6 +338,7 @@ TEST_F(FirstPacketServer, OneServicePacketArmsLossEdgeBeforeStateTick)
     auto source = add("single", 50, 50, 0, "joy", "service");
     ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
     EXPECT_EQ(stateAtReceive->load(), static_cast<int>(transport::ControlSignalState::INITIAL));
+    EXPECT_EQ(switchResult->load(), SwitchResponse::RESPONSE_NOT_ACTIVE);
     ASSERT_TRUE(waitFor(
         [&]
         {
@@ -515,6 +545,284 @@ TEST_F(ServerIntegration, TwistServiceSentinelAndManualSelection)
             return twistStops_ == 1;
         }));
     EXPECT_EQ(twistOutputs_, 1);
+}
+
+TEST_F(ServerIntegration, CrossTypeTakeoverAndFallbackUseOnePriorityPolicy)
+{
+    auto low = add("joy_low", 20, 2000, 0, "joy", "service");
+    ASSERT_EQ(low.send(joy()), transport::SendResult::OK);
+    auto high = add("twist_high", 80, 300, 0, "twist", "service");
+    Twist normal;
+    normal.linear.x = 0.4;
+    ASSERT_EQ(high.send(normal), transport::SendResult::OK);
+    EXPECT_EQ(twistOutputs_, 0);
+    auto request = normal;
+    request.linear.z = request.angular.x = request.angular.y = 99;
+    ASSERT_EQ(high.send(request), transport::SendResult::OK);
+    EXPECT_TRUE(server_->getActiveSink<Joy>().empty());
+    EXPECT_EQ(server_->getActiveSink<Twist>(), channel("twist_high"));
+    EXPECT_EQ(stops_, 1);
+    EXPECT_EQ(twistOutputs_, 0);
+    ASSERT_EQ(high.send(normal), transport::SendResult::OK);
+    EXPECT_EQ(twistOutputs_, 1);
+    const auto before = count("joy_low");
+    auto lowRequest = joy();
+    lowRequest.buttons[11] = 1;
+    ASSERT_EQ(low.send(lowRequest), transport::SendResult::OK);
+    EXPECT_EQ(server_->getActiveSink<Twist>(), channel("twist_high"));
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return server_->getActiveSink<Joy>() == channel("joy_low");
+        }));
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    EXPECT_EQ(twistStops_, 1);
+    EXPECT_EQ(count("joy_low"), before);  // fallback does not replay
+    ASSERT_EQ(low.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(count("joy_low"), before + 1);
+}
+
+TEST_F(ServerIntegration, EqualPriorityFallbackUsesChannelOrderAcrossTypes)
+{
+    auto active = add("outgoing", 90, 300, 0, "joy", "service");
+    auto alpha = add("alpha", 50, 3000, 0, "twist", "service");
+    auto beta = add("beta", 50, 3000, 0, "joy", "service");
+    ASSERT_EQ(active.send(joy()), transport::SendResult::OK);
+    Twist message;
+    message.linear.x = 0.4;
+    ASSERT_EQ(alpha.send(message), transport::SendResult::OK);
+    ASSERT_EQ(beta.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(server_->getActiveSink<Joy>(), channel("outgoing"));
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return server_->getActiveSink<Twist>() == channel("alpha");
+        }));
+    EXPECT_TRUE(server_->getActiveSink<Joy>().empty());
+    EXPECT_EQ(stops_, 1);
+    EXPECT_EQ(count("beta"), 0u);
+    EXPECT_EQ(twistOutputs_, 0);  // channel ordering wins over type ordering
+    ASSERT_EQ(alpha.send(message), transport::SendResult::OK);
+    EXPECT_EQ(twistOutputs_, 1);
+}
+
+TEST_F(ServerIntegration, StrictSwitchRejectsMissingInactiveAndUnsupportedWithoutSideEffects)
+{
+    auto active = add("active", 80, 3000, 0, "joy", "service");
+    ASSERT_EQ(active.send(joy()), transport::SendResult::OK);
+    auto initial = add("initial", 90, 3000);
+    auto unsupported = add("text", 100, 3000, 0, "string");
+    EXPECT_EQ(server_->switchController("absent"), SwitchResponse::RESPONSE_NOT_FOUND);
+    EXPECT_EQ(server_->switchController(initial.controllerName()), SwitchResponse::RESPONSE_NOT_ACTIVE);
+    EXPECT_EQ(server_->switchController(unsupported.controllerName()), SwitchResponse::RESPONSE_UNSUPPORTED_TYPE);
+    EXPECT_EQ(server_->getStatus().active_controller_name, active.controllerName());
+    EXPECT_EQ(stops_, 0);
+    EXPECT_EQ(count("active"), 1u);
+    const auto status = server_->getStatus();
+    EXPECT_EQ(status.registered_controllers.size(), 3u);
+    EXPECT_FALSE(status.has_output);  // output callbacks are not publish receipts
+    ASSERT_TRUE(sources_->unregisterSource(initial));
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return !server_->csm().getSink(initial.controllerName()).valid();
+        }));
+    EXPECT_EQ(server_->switchController(initial.controllerName()), SwitchResponse::RESPONSE_NOT_FOUND);
+}
+
+TEST_F(FirstPacketServer, StrictSwitchRejectsLocallyStaleDataEvenBeforeTransportTimeoutTick)
+{
+    auto source = add("stale", 50, 80, 0, "joy", "service");
+    ASSERT_TRUE(sendUntil(source,
+                          joy(),
+                          [&]
+                          {
+                              return server_->csm().getSinkState(source.controllerName()) ==
+                                     transport::ControlSignalState::ACTIVE;
+                          }));
+    ASSERT_EQ(server_->switchController(source.controllerName()), SwitchResponse::RESPONSE_SUCCESS);
+    std::this_thread::sleep_for(100ms);
+    ASSERT_EQ(server_->csm().getSinkState(source.controllerName()), transport::ControlSignalState::ACTIVE);
+    EXPECT_EQ(server_->switchController(source.controllerName()), SwitchResponse::RESPONSE_NOT_ACTIVE);
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return server_->csm().getSinkState(source.controllerName()) == transport::ControlSignalState::TIMEOUT;
+        }));
+    EXPECT_EQ(server_->switchController(source.controllerName()), SwitchResponse::RESPONSE_NOT_ACTIVE);
+}
+
+TEST_F(ServerIntegration, InterruptLatchesAllTypesAndResetRequiresNewData)
+{
+    auto source = add("joy", 20, 150, 0, "joy", "service");
+    auto twist = add("twist", 100, 150, 0, "twist", "service");
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    const auto before = count("joy");
+    ASSERT_TRUE(server_->interrupt());
+    EXPECT_FALSE(server_->interrupt());
+    EXPECT_EQ(interruptionStops_, 1);
+    EXPECT_TRUE(server_->getActiveSink<Joy>().empty());
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    auto request = joy();
+    request.buttons[11] = 1;
+    auto emergency = joy();
+    emergency.axes[5] = -1;
+    Twist movement;
+    movement.linear.x = 0.6;
+    for (const auto& message : {joy(), request, emergency})
+        ASSERT_EQ(source.send(message), transport::SendResult::OK);
+    ASSERT_EQ(twist.send(movement), transport::SendResult::OK);
+    auto newSource = add("new", 100, 150, 0, "joy", "service");
+    ASSERT_EQ(newSource.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(server_->switchController(twist.controllerName()), SwitchResponse::RESPONSE_INTERRUPTED);
+    EXPECT_FALSE(server_->setActiveSink<Twist>(channel("twist")));
+    std::this_thread::sleep_for(250ms);  // multiple watchdog ticks, no extra stop
+    EXPECT_EQ(count("joy"), before);
+    EXPECT_EQ(count("new"), 0u);
+    EXPECT_EQ(twistOutputs_, 0);
+    EXPECT_EQ(stops_, 0);
+    EXPECT_EQ(twistStops_, 0);
+    EXPECT_EQ(interruptionStops_, 1);
+    const auto interrupted = server_->getStatus();
+    EXPECT_TRUE(interrupted.interrupted);
+    EXPECT_TRUE(interrupted.active_controller_name.empty());
+    EXPECT_EQ(interrupted.registered_controllers.size(), 3u);
+    EXPECT_TRUE(interrupted.has_output);
+    EXPECT_EQ(interrupted.output_api_id, 1003);
+    EXPECT_TRUE(interrupted.output_controller_name.empty());
+
+    // Fresh traffic while interrupted still must not become reset-time fallback.
+    ASSERT_EQ(twist.send(movement), transport::SendResult::OK);
+    server_->resetInterrupt();
+    server_->resetInterrupt();
+    EXPECT_EQ(resets_, 2);  // once on interrupt, once on the effective reset
+    EXPECT_FALSE(server_->getStatus().interrupted);
+    EXPECT_TRUE(server_->getStatus().active_controller_name.empty());
+    EXPECT_EQ(server_->switchController(twist.controllerName()), SwitchResponse::RESPONSE_NOT_ACTIVE);
+    std::this_thread::sleep_for(100ms);
+    EXPECT_TRUE(server_->getActiveSink<Twist>().empty());
+    EXPECT_EQ(twistOutputs_, 0);
+    EXPECT_EQ(interruptionStops_, 1);
+    ASSERT_EQ(twist.send(movement), transport::SendResult::OK);
+    EXPECT_EQ(twistOutputs_, 1);
+    EXPECT_EQ(server_->getStatus().active_controller_name, twist.controllerName());
+}
+
+TEST_F(ServerIntegration, InterruptBeforeAnyOutputStillStopsAndSameValueRecoversAfterReset)
+{
+    auto converter = std::make_shared<rv2_interfaces::rv2_server_control::OutputMessageConverter>();
+    resetHook_ = [converter]
+    {
+        converter->reset();
+    };
+    auto published = std::make_shared<std::atomic<int>>(0);
+    Server::TypeConfig<Joy> config;
+    config.outputCb = [this, converter, published](const Joy& message, const transport::ControlSignalInfo& info)
+    {
+        if (converter->convert(info.channel_name, message))
+        {
+            ++*published;
+            builtin_interfaces::msg::Time stamp;
+            stamp.sec = 12;
+            stamp.nanosec = 34;
+            server_->recordOutput(stamp, info.controller_name, 1008, "payload", {4, 5});
+        }
+    };
+    server_->registerTypeConfig(std::move(config));
+    EXPECT_EQ(server_->getStatus().server_name, prefix_);
+    EXPECT_FALSE(server_->getStatus().has_output);
+    ASSERT_TRUE(server_->interrupt());
+    EXPECT_EQ(interruptionStops_, 1);
+    server_->resetInterrupt();
+    auto source = add("same", 50, 3000, 0, "joy", "service");
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    ASSERT_EQ(published->load(), 1);
+    const auto status = server_->getStatus();
+    EXPECT_EQ(status.output_stamp.sec, 12);
+    EXPECT_EQ(status.output_stamp.nanosec, 34u);
+    EXPECT_EQ(status.output_controller_name, source.controllerName());
+    EXPECT_EQ(status.output_api_id, 1008);
+    EXPECT_EQ(status.output_parameter, "payload");
+    EXPECT_EQ(status.output_binary, (std::vector<uint8_t>{4, 5}));
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(published->load(), 1);
+    EXPECT_EQ(server_->getStatus().output_stamp, status.output_stamp);
+    ASSERT_TRUE(server_->interrupt());
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(published->load(), 1);
+    server_->resetInterrupt();
+    EXPECT_EQ(published->load(), 1);
+    ASSERT_EQ(source.send(joy()), transport::SendResult::OK);
+    EXPECT_EQ(published->load(), 2);
+}
+
+TEST_F(ServerIntegration, InterruptFencesInFlightOutputAndAllowsRecursiveStatusQueries)
+{
+    struct Gate
+    {
+        std::atomic<bool> entered{false}, release{false}, started{false}, completed{false};
+        std::atomic<int> outputs{0};
+    };
+    struct ReleaseGuard
+    {
+        std::shared_ptr<Gate> gate = std::make_shared<Gate>();
+        std::thread interrupt;
+        ~ReleaseGuard()
+        {
+            gate->release = true;
+            if (interrupt.joinable())
+                interrupt.join();
+        }
+    } guard;
+    const auto gate = guard.gate;
+    Server::TypeConfig<Joy> config;
+    config.outputCb = [this, gate](const Joy&, const transport::ControlSignalInfo& info)
+    {
+        gate->entered = true;
+        while (!gate->release.load())
+            std::this_thread::yield();
+        server_->recordOutput(sinkNode_->now().to_msg(), info.controller_name, 1008, "in-flight", {});
+        EXPECT_EQ(server_->getStatus().output_controller_name, info.controller_name);
+        ++gate->outputs;
+    };
+    server_->registerTypeConfig(std::move(config));
+    auto source = add("inflight", 50, 3000);
+    ASSERT_TRUE(sendUntil(source,
+                          joy(),
+                          [&]
+                          {
+                              return gate->entered.load();
+                          }));
+    guard.interrupt = std::thread(
+        [&, gate]
+        {
+            gate->started = true;
+            EXPECT_TRUE(server_->interrupt());
+            gate->completed = true;
+        });
+    ASSERT_TRUE(waitFor(
+        [&]
+        {
+            return gate->started.load();
+        }));
+    std::this_thread::sleep_for(50ms);
+    EXPECT_FALSE(gate->completed);
+    gate->release = true;
+    guard.interrupt.join();
+    EXPECT_TRUE(gate->completed);
+    const auto before = gate->outputs.load();
+    const auto status = server_->getStatus();
+    EXPECT_TRUE(status.interrupted);
+    EXPECT_EQ(status.output_api_id, 1003);  // safety stop follows the in-flight Move
+    EXPECT_TRUE(status.output_controller_name.empty());
+    for (int i = 0; i < 5; ++i)
+    {
+        source.send(joy(0.8f));
+        std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_EQ(gate->outputs.load(), before);
+    EXPECT_EQ(interruptionStops_, 1);
+    EXPECT_EQ(server_->getStatus().output_api_id, 1003);
 }
 
 TEST_F(ServerIntegration, DestructorFencesAnInFlightUserCallback)

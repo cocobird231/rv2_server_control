@@ -11,6 +11,9 @@ repositories:
   unitree_api:
     type: local
     path: thirdparty/unitree/unitree_api
+  unitree_go:
+    type: local
+    path: thirdparty/unitree/unitree_go
   rv2_csm_topic_bridge:
     type: local
     path: ../rv2_csm_topic_bridge

@@ -16,6 +16,7 @@ find_package(r1_interfaces REQUIRED)
 find_package(rv2_control_signal_transport REQUIRED)
 find_package(joy_interpreter REQUIRED)
 find_package(unitree_api REQUIRED)
+find_package(unitree_go REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 add_library(control_server_component SHARED
@@ -28,7 +29,7 @@ target_include_directories(control_server_component PUBLIC
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}/thirdparty>)
 ament_target_dependencies(control_server_component
   rclcpp rclcpp_components sensor_msgs geometry_msgs r1_interfaces
-  rv2_control_signal_transport joy_interpreter unitree_api)
+  rv2_control_signal_transport joy_interpreter unitree_api unitree_go)
 target_link_libraries(control_server_component
   joy_interpreter::joy_interpreter_lib nlohmann_json::nlohmann_json)
 rclcpp_components_register_node(control_server_component
@@ -54,7 +55,7 @@ ament_export_include_directories(include include/${PROJECT_NAME}/thirdparty)
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_libraries(control_server_component)
 ament_export_dependencies(rclcpp rclcpp_components sensor_msgs geometry_msgs r1_interfaces
-  rv2_control_signal_transport joy_interpreter unitree_api nlohmann_json)
+  rv2_control_signal_transport joy_interpreter unitree_api unitree_go nlohmann_json)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 install(FILES thirdparty/unitree/LICENSE
   DESTINATION share/${PROJECT_NAME}/thirdparty/unitree)
@@ -79,6 +80,10 @@ if(BUILD_TESTING)
   add_launch_test(test/integration/test_joy_bridge.py
     TARGET test_joy_bridge TIMEOUT 120)
   set_property(TEST test_joy_bridge APPEND PROPERTY LABELS integration)
+
+  add_launch_test(test/integration/test_control_services.py
+    TARGET test_control_services TIMEOUT 180)
+  set_property(TEST test_control_services APPEND PROPERTY LABELS integration)
 
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
