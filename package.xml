@@ -14,7 +14,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>r1_interfaces</depend>
+  <depend version_gte="0.1.3">r1_interfaces</depend>
   <depend>nlohmann-json-dev</depend>
   <depend>rv2_control_signal_transport</depend>
   <depend>joy_interpreter</depend>
