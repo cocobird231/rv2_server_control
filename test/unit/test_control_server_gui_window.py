@@ -3,21 +3,21 @@
 import time
 from types import SimpleNamespace
 
-import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
+from pytest import fixture
 from r1_interfaces.msg import ControlServerStatus, ControlSignalInfo
 from rv2_server_control_gui.window import ControlServerWindow
 
 
-@pytest.fixture(scope="module")
+@fixture(scope="module")
 def application():
     """Keep a Qt application alive for every widget in this module."""
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
+@fixture
 def window(application):
     """Supply a recording client; production ROS behavior has separate coverage."""
     state = SimpleNamespace(
@@ -185,3 +185,23 @@ def test_controller_names_and_errors_are_literal_text(window):
     assert window.active_label.text() == "<b>controller</b>"
     assert window.result_label.textFormat() == Qt.PlainText
     assert "<b>not active</b>" in window.result_label.text()
+
+
+def test_small_window_preserves_readable_status_and_control_layout(window, application):
+    """Scroll the content instead of compressing status text over nearby widgets."""
+    snapshot(window, interrupted=True)
+    window.client.state.connected = False
+    window.client.state.connection_message = (
+        "Status request timed out; showing the last received snapshot. "
+        "Wait for a fresh server response before requesting another operation."
+    )
+    window.resize(660, 600)
+    window.render()
+    application.processEvents()
+    label = window.connection_label
+    assert label.isVisible()
+    assert label.height() >= label.heightForWidth(label.width())
+    assert label.geometry().bottom() < window.interrupt_label.y()
+    assert window.controller_table.geometry().bottom() < window.switch_button.y()
+    assert window.output_controller_label.geometry().bottom() < window.api_label.y()
+    assert window.api_label.geometry().bottom() < window.output_stamp_label.y()

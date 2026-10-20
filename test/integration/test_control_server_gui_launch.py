@@ -1,11 +1,11 @@
 """Exercise installed GUI launch namespacing and child-driven shutdown boundaries."""
 
 import os
+import pathlib
 import signal
 import sys
 import time
 import unittest
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription, LaunchService
@@ -19,7 +19,7 @@ from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace
 from launch_testing import post_shutdown_test
-from launch_testing.actions import ReadyToTest
+from launch_testing.actions import KeepAliveProc, ReadyToTest
 from launch_testing.asserts import assertExitCodes
 from r1_interfaces.srv import ControlServerStatusReq
 from rclpy import create_node, init, shutdown
@@ -36,9 +36,9 @@ def executable_name(command):
     """Recognize only the actual installed executables, including Python scripts."""
     return next(
         (
-            Path(argument).name
+            pathlib.Path(argument).name
             for argument in command
-            if Path(argument).name in EXECUTABLES
+            if pathlib.Path(argument).name in EXECUTABLES
         ),
         None,
     )
@@ -47,7 +47,7 @@ def executable_name(command):
 def run_installed_scenario():
     """Run both includes in one isolated launch session and check every child exit."""
     launch_file = str(
-        Path(get_package_share_directory("rv2_server_control"))
+        pathlib.Path(get_package_share_directory("rv2_server_control"))
         / "launch/control_server_gui.launch.py"
     )
     exited = []
@@ -107,11 +107,19 @@ def run_installed_scenario():
 def generate_test_description():
     """Keep combo Shutdown events inside a process owned by launch_testing."""
     process = ExecuteProcess(
-        cmd=[sys.executable, str(Path(__file__).resolve()), "--launch-scenario"],
+        cmd=[
+            sys.executable,
+            str(pathlib.Path(__file__).resolve()),
+            "--launch-scenario",
+        ],
         additional_env={"QT_QPA_PLATFORM": "offscreen"},
         output="screen",
     )
-    return LaunchDescription([process, ReadyToTest()]), {"scenario": process}
+    # The scenario intentionally exits before graph/process assertions finish.
+    # Keep the outer harness alive until launch_testing completes those checks.
+    return LaunchDescription([KeepAliveProc(), process, ReadyToTest()]), {
+        "scenario": process
+    }
 
 
 def descendant_commands(parent_pid):
@@ -121,7 +129,9 @@ def descendant_commands(parent_pid):
     while pending:
         pid = pending.pop()
         try:
-            children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+            children = (
+                pathlib.Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+            )
         except OSError:
             continue
         for child_text in children:
@@ -129,7 +139,9 @@ def descendant_commands(parent_pid):
             if child in commands:
                 continue
             try:
-                command = Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")
+                command = (
+                    pathlib.Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")
+                )
             except OSError:
                 continue
             commands[child] = [part.decode() for part in command if part]
@@ -231,7 +243,9 @@ class TestInstalledGuiLaunch(unittest.TestCase):
         # Its exit must not emit a global Shutdown event or stop that server.
         os.kill(children["observer"], signal.SIGTERM)
         self.assertTrue(
-            self.wait_for(lambda: not Path(f"/proc/{children['observer']}").exists())
+            self.wait_for(
+                lambda: not pathlib.Path(f"/proc/{children['observer']}").exists()
+            )
         )
         self.assertTrue(
             self.wait_for(lambda: self.node.count_clients(STATUS_SERVICE) == 2)
@@ -240,7 +254,7 @@ class TestInstalledGuiLaunch(unittest.TestCase):
         # original server still answers, rather than winning that teardown race.
         settle_until = time.monotonic() + 0.5
         self.assertTrue(self.wait_for(lambda: time.monotonic() >= settle_until))
-        self.assertTrue(Path(f"/proc/{parent_pid}").exists())
+        self.assertTrue(pathlib.Path(f"/proc/{parent_pid}").exists())
         self.assertEqual(
             find_child(parent_pid, "control_server", ROBOT_NAMESPACE),
             children["server"],
@@ -259,7 +273,8 @@ class TestInstalledGuiLaunch(unittest.TestCase):
         self.assertTrue(
             self.wait_for(
                 lambda: all(
-                    not Path(f"/proc/{pid}").exists() for pid in children.values()
+                    not pathlib.Path(f"/proc/{pid}").exists()
+                    for pid in children.values()
                 )
             ),
             "a GUI-owned server or master survived combo shutdown",

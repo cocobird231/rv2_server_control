@@ -4,9 +4,9 @@ import os
 import signal
 import sys
 
-import rclpy
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
+from rclpy import init, ok, try_shutdown
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 
@@ -34,7 +34,7 @@ def main(args=None):
     old_handlers = {}
     exit_code = 0
     try:
-        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        init(args=args, signal_handler_options=SignalHandlerOptions.NO)
         node = ControlServerGuiNode()
         executor = SingleThreadedExecutor(context=node.context)
         executor.add_node(node)
@@ -42,7 +42,7 @@ def main(args=None):
 
         def update():
             nonlocal exit_code
-            if not rclpy.ok(context=node.context):
+            if not ok(context=node.context):
                 app.quit()
                 return
             try:
@@ -73,7 +73,7 @@ def main(args=None):
             executor.shutdown()
         if node is not None:
             node.destroy_node()
-        rclpy.try_shutdown()
+        try_shutdown()
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
     return exit_code

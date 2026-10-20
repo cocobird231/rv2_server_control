@@ -315,7 +315,7 @@ class GuiScenario:
         )
 
     def assert_quiet(self, duration=0.25):
-        """Polling and rendering must not publish or change last-output metadata."""
+        """Poll and render without publishing or changing last-output metadata."""
         before = output_metadata(self.client.state.status)
         stamp = stamp_ns(self.client.state.status.stamp)
         count = len(self.requests)
