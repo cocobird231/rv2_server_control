@@ -2,7 +2,7 @@
 
 接收最新 `rv2_control_signal_transport` 的 R1 Joy／Twist sources，在 Joy／Twist 間選擇唯一 active controller，將變化轉為 `/api/sport/request` 的 Unitree sport requests。控制描述與 service 完全使用 `r1_interfaces`，不依賴 legacy `rv2_interfaces` package。
 
-現行 services、控制器切換與優先權規則，見 [Control Server 架構文件](docs/control_server_architecture.md)，內含資料流、仲裁範例、急停／跨型別行為及查詢方式。
+可用 PyQt5／rclpy 桌面程式 `control_server_gui` 查看狀態與最後實際輸出，並透過既有三個 services 手動切換來源或解除 wireless interruption。現行 services、控制器切換與優先權規則，見 [Control Server 架構文件](docs/control_server_architecture.md)。
 
 ## 啟動與實機觀察
 
@@ -43,6 +43,48 @@ ros2 service call /control_server/reset_interrupt r1_interfaces/srv/ResetInterru
 ros2 topic pub --once /wirelesscontroller unitree_go/msg/WirelessController '{}'
 ```
 
+## 桌面 GUI
+
+建置、source workspace 後，在有 `DISPLAY` 或 `WAYLAND_DISPLAY` 的本機桌面執行。預設只開 GUI，連到既有 server：
+
+```bash
+ros2 launch rv2_server_control control_server_gui.launch.py
+ros2 launch rv2_server_control control_server_gui.launch.py --show-args
+
+# 也可直接啟動 GUI node，指定含 namespace 的 service prefix
+ros2 run rv2_server_control control_server_gui --ros-args \
+  -p server_name:=/robot/control_server \
+  -p poll_interval_ms:=500 -p service_timeout_ms:=2000
+```
+
+尚未啟動 server 時，可以同時啟動 GUI、server 與預設 master；joy node、bridge 仍需另外啟動：
+
+```bash
+ros2 launch rv2_server_control control_server_gui.launch.py start_server:=true
+
+# 已有 master，server 讀取指定 YAML；GUI 與 server 使用相同 service prefix
+ros2 launch rv2_server_control control_server_gui.launch.py \
+  start_server:=true start_master:=false \
+  config_file:=/absolute/path/control_server.yaml \
+  server_name:=/robot/control_server
+```
+
+| GUI node 參數／同名 launch argument | 預設 | 用途 |
+|---|---|---|
+| `server_name` | `control_server` | 三個操作服務的 prefix；相對名稱沿用 node namespace，`/robot/control_server` 為完整名稱 |
+| `poll_interval_ms` | `500` | 非阻塞 status 輪詢間隔，必須為正整數 |
+| `service_timeout_ms` | `2000` | Service request 等待期限，必須為正整數 |
+
+GUI launch 另有 `start_server=false`、`start_master=true`、`config_file` 與 `master_name`。`start_master`、server YAML 與 `master_name` 只在 `start_server=true` 時生效。GUI launch 會將 `server_name` 明確傳給 server，因此即使使用預設 `control_server`，也會覆蓋 YAML 中的同名設定；要連其他名稱必須明確指定。`master_name` 預設留空，沿用 YAML。Watchdog、`log_output` 等 server 設定放在 YAML，GUI launch 不另設同名參數。
+
+畫面顯示 Connected／stale、interrupted、目前 owner、已註冊 controller 表，以及最後實際 request 的 API ID、parameter、binary、來源與時間。`has_output=false` 表示尚無實際輸出；最後輸出不是最後輸入，也不是機器人 ACK。已斷線或過期的畫面資料不可當成目前狀態。
+
+在表中選一列後按 **Switch to selected controller**，送出該列的 `controller_name`。Registered 不等於 transport ACTIVE；GUI 不自行推算來源是否可切換，最終由 server 檢查並回覆結果及 `reason`。Wireless interrupted 時停用切換；**Reset wireless interrupt** 只呼叫 reset service，成功後仍要等新的控制資料，下一封 wireless 訊息仍會再次鎖定。
+
+失聯或操作尚未完成時停用操作按鈕。Service 逾時表示結果未知，server 可能已執行；需由後續新 status 確認，GUI 不自動重送 switch／reset，也不自動解除 interruption。Status 輪詢只查詢狀態，不影響 event-triggered 輸出；GUI 不直接發布 robot requests。
+
+關閉視窗或按 Ctrl+C 會清理 GUI 的 ROS node 並結束程式。GUI-only 模式不停止既有 server；`start_server=true` 的組合 launch 在 GUI 結束時結束整個 launch session，包含該次啟動的 server／master。若將組合模式 include 到其他 launch，該 session 的其他節點也會一起結束；只要觀察既有系統時使用預設 GUI-only 模式。無桌面的自動化測試使用 `QT_QPA_PLATFORM=offscreen`，不代表已完成實體桌面驗收。
+
 ## 訊號與仲裁
 
 - Joy 使用既有實機 mapping：axes 0／1／3 → Move x／y／yaw；axes 5（R2）小於 0.5 → 急停，放開時為 +1。A／B／X／Y（buttons 0–3）按下邊緣 → StandUp／StandDown／StopMove／RecoveryStand。button 11 → request-active；裝置沒有該索引時視為未按下，不越界。
@@ -62,7 +104,7 @@ ros2 topic pub --once /wirelesscontroller unitree_go/msg/WirelessController '{}'
 
 ## 建置依賴
 
-標準 ROS dependencies 由 rosdep 安裝。Server 仍宣告並以 `find_package(unitree_api REQUIRED)`／`find_package(unitree_go REQUIRED)` 使用獨立的 Unitree ROS package；colcon 在辨識到 server 的 `package.xml` 後不會繼續搜尋其內部套件，因此使用以下入口補足 discovery。
+標準 ROS dependencies（包含 GUI 的 PyQt5、rclpy）由 rosdep 安裝。Server 仍宣告並以 `find_package(unitree_api REQUIRED)`／`find_package(unitree_go REQUIRED)` 使用獨立的 Unitree ROS package；colcon 在辨識到 server 的 `package.xml` 後不會繼續搜尋其內部套件，因此使用以下入口補足 discovery。
 
 先 source ROS 及所需 underlay，從 workspace 根目錄執行：
 

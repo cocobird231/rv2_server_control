@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Start the installed control server desktop client."""
+
+from rv2_server_control_gui.main import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

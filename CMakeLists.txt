@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -57,6 +58,8 @@ ament_export_libraries(control_server_component)
 ament_export_dependencies(rclcpp rclcpp_components sensor_msgs geometry_msgs r1_interfaces
   rv2_control_signal_transport joy_interpreter unitree_api unitree_go nlohmann_json)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+ament_python_install_package(rv2_server_control_gui)
+install(PROGRAMS scripts/control_server_gui DESTINATION lib/${PROJECT_NAME})
 install(FILES thirdparty/unitree/LICENSE
   DESTINATION share/${PROJECT_NAME}/thirdparty/unitree)
 
@@ -84,6 +87,20 @@ if(BUILD_TESTING)
   add_launch_test(test/integration/test_control_services.py
     TARGET test_control_services TIMEOUT 180)
   set_property(TEST test_control_services APPEND PROPERTY LABELS integration)
+
+  foreach(gui_suite client window)
+    ament_add_pytest_test(test_control_server_gui_${gui_suite}
+      test/unit/test_control_server_gui_${gui_suite}.py TIMEOUT 60
+      ENV "QT_QPA_PLATFORM=offscreen" "PYTHONDONTWRITEBYTECODE=1"
+      APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}")
+    set_property(TEST test_control_server_gui_${gui_suite} APPEND PROPERTY LABELS unit)
+  endforeach()
+  add_launch_test(test/integration/test_control_server_gui.py
+    TARGET test_control_server_gui TIMEOUT 180)
+  set_property(TEST test_control_server_gui APPEND PROPERTY LABELS integration)
+  add_launch_test(test/integration/test_control_server_gui_launch.py
+    TARGET test_control_server_gui_launch TIMEOUT 90)
+  set_property(TEST test_control_server_gui_launch APPEND PROPERTY LABELS integration)
 
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
