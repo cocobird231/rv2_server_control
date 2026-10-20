@@ -1,6 +1,6 @@
 # Control Server 現行架構、服務與控制權仲裁
 
-查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 已隨 `r1_interfaces` v0.1.3 的 [PR #3](https://github.com/cocobird231/r1_interfaces/pull/3) 合併，主線 SHA 為 `dc3e199`，與原 release commit `34e5d1e` 的 tree 相同。Server 的 CMake 與 manifest 明確要求 interfaces ≥0.1.3，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表 server 新版本已發布或已完成實機驗收。
+查核日期：2026-10-20。Server 基線為已合併 `r1` commit `edc9ad1`／v0.2.1，transport 為 v0.2.0／`5a91d31`。本輪在此基礎新增獨立 PyQt5／rclpy GUI client，使用既有三個操作服務，不修改 server、Core、interfaces 或 thirdparty 行為。`ControlServerStatus` 與三個 services 已隨 `r1_interfaces` v0.1.3 的 [PR #3](https://github.com/cocobird231/r1_interfaces/pull/3) 合併，主線 SHA 為 `dc3e199`，與原 release commit `34e5d1e` 的 tree 相同。Server 的 CMake 與 manifest 明確要求 interfaces ≥0.1.3，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表新增 GUI 已發布或已完成桌面／實機驗收。
 
 ## 1. 目前行為摘要
 
@@ -10,6 +10,7 @@
 - 三個操作服務提供狀態查詢、依 `controller_name` 手動切換，以及明確解除 wireless interrupt。手動 RPC 要求來源同時為 transport `ACTIVE` 與本地可用，不比較 priority。
 - R2／Twist sentinel 急停仍不比較 priority、也不限 active 來源；這條路徑本身不鎖存。它與 wireless interrupt、active Joy 的 X 按鍵 StopMove 是不同操作。
 - `/wirelesscontroller` 的**每一封** `unitree_go/msg/WirelessController`，包括全零與重複訊息，都觸發全域 interrupt latch。首次鎖定發布一次 StopMove；鎖定期間抑制 server 所有後續控制輸出，直到明確 reset。
+- 桌面 GUI 以 status service 顯示狀態，以 switch／reset service 執行使用者操作；沒有直接 robot publisher，不改變 server 的仲裁或輸出時機。
 
 下文的「active」指 server 選中的控制來源；R1 status 的 `STATE_ACTIVE` 只表示訊號存活，兩者不能混用。
 
@@ -32,6 +33,10 @@ flowchart LR
     D -. "命令完成後以返回的 Request 紀錄" .-> T["最後實際輸出狀態"]
     A -. "owner / interrupted / registered" .-> T
     T --> U["control_server_status service"]
+    G["PyQt5 / rclpy GUI"] -->|"非阻塞 status 輪詢"| U
+    U -->|"狀態快照 / reason"| G
+    G -->|"使用者選擇 Switch / Reset"| Q
+    Q -->|"結果碼 / reason"| G
     W["watchdog：預設 50 ms"] --> A
     M -. "register / heartbeat / status" .-> X["獨立 CSM Master"]
     B -. "register / heartbeat / status" .-> X
@@ -42,6 +47,7 @@ flowchart LR
 | 組件 | 目前責任 | 主要實作 |
 |---|---|---|
 | `ControlServerNode` | 建立操作服務與 wireless subscription；`sendCommand()` 執行命令後，以返回的已發布 request 與來源 controller 紀錄輸出 | [control_server.cpp](../src/control_server.cpp) |
+| `control_server_gui` | 顯示三服務回覆、輪詢狀態、送出使用者選擇的 switch／reset；服務失聯、逾時或尚在等待時限制操作 | Python package `rv2_server_control_gui` |
 | R1 `ControlSignalManager` | 管理來源註冊、建立 Sink、接收資料、追蹤存活狀態、與 master 對帳 | transport 的 `r1/control_signal_manager.h` |
 | `ControlServer` | 記錄各 channel 收訊、跨型別選單一 active、處理急停／失聯、wireless latch 與手動操作 | [control_server.h](../include/rv2_server_control/control_server.h) |
 | `OutputMessageConverter` | 保存 Joy 按鍵與速度去重狀態，將需要輸出的普通訊息轉成 `SportClientCmd` | [output_message_convert.h](../include/rv2_server_control/output_message_convert.h) |
@@ -131,6 +137,32 @@ Jazzy standalone node 使用預設 NodeOptions 時，另有下列標準服務：
 R1 管理端點 prefix 由 `server_name` 決定，標準服務 prefix 則來自 **ROS node 名稱**。改 `server_name` 不會自動改 node name。Master 的 R1 prefix 預設 `csm_master`，它自己的 node name 是 `csm_master_node`。使用 component container 時，還可能看到 container 自己的服務；logger services 並非 NodeOptions 預設啟用項目。
 
 本版操作使用 §3.1 的三個具名服務，不使用 legacy `ControlServerReq`，也沒有修改 priority 的專用 service。標準參數服務不代替操作服務：server 設定在建構時讀取，沒有將參數變更套用到仲裁狀態的 callback。`set_parameters` 成功不表示 Manager 已重建或控制權已切換。
+
+### 3.5 桌面 GUI 的服務邊界
+
+`control_server_gui` 是獨立 ROS node，Python package 為 `rv2_server_control_gui`。它僅使用 §3.1 的 status、switch、reset，不訂閱控制資料或直接發布 `/api/sport/request`。預設每 500 ms 非阻塞輪詢 status，service timeout 為 2000 ms；兩者可用正整數參數 `poll_interval_ms`、`service_timeout_ms` 調整。輪詢沒有控制副作用，不會增加 Move 或改變 event-triggered 去重行為。
+
+GUI 顯示 online／stale、interrupted、目前 owner、完整 registered table 與最後實際輸出欄位。表中的 registration 不能證明 transport ACTIVE 或 Core 資料仍新鮮；選列後按 Switch，只將 `controller_name` 送給 server，由 server 套用既有嚴格切換條件。Interruption 期間停用 Switch；reset 仍是使用者明確操作，遵守 §7 的不重播與下一封 wireless 再鎖定規則。
+
+失聯或操作尚在等待時停用操作按鈕，錯誤顯示 typed result 與 `reason`。逾時只能判定 client 沒有及時收到回覆，不能斷言 server 沒執行；結果須由後續新的 status 確認。GUI 不因逾時而重送 switch／reset，不自動 reset，也不將本地選取列當成 server 已切換。Status 的最後輸出仍是 §9 的本地 publish 紀錄，不是 robot ACK；stale 畫面亦不保證仍反映目前 owner 或 interruption。
+
+在已 source workspace 的桌面啟動：
+
+```bash
+# 預設只啟動 GUI；連線到既有 server
+ros2 launch rv2_server_control control_server_gui.launch.py
+
+# 同時啟動 server 與預設 master；joy／bridge 另行啟動
+ros2 launch rv2_server_control control_server_gui.launch.py start_server:=true
+
+# 指定完整 service prefix
+ros2 run rv2_server_control control_server_gui --ros-args \
+  -p server_name:=/robot/control_server
+```
+
+GUI `server_name` 預設 `control_server`，相對名稱沿用 node namespace，以 `/` 開頭的名稱為完整 service prefix。GUI launch 的 `start_server` 預設 false；`start_master=true` 只在啟動 server 時生效，已有 master 可設 false。`config_file` 指定 server YAML，`master_name` 留空時沿用 YAML；GUI launch 明確 forward `server_name`，會覆蓋 YAML 內設定，包括預設 `control_server`。其他 server 設定如 watchdog／log_output 使用 YAML，GUI launch 不另設同名參數。
+
+正常使用需有 `DISPLAY` 或 `WAYLAND_DISPLAY`；headless 自動化測試使用 `QT_QPA_PLATFORM=offscreen`。視窗關閉與 SIGINT 會清理 GUI ROS node 並退出。GUI-only 模式不終止既有 server；組合 launch 在 GUI 結束時關閉整個 launch session，包含被 include 時同 session 的其他節點，不管理外部既有程序。
 
 ## 4. controller、channel、priority 分別代表什麼
 
