@@ -54,6 +54,10 @@ ros2 topic pub --once /wirelesscontroller unitree_go/msg/WirelessController '{}'
 - `timeout_ns` 與 `disconnect_timeout_ns` 來自 source descriptor；兩者都從最後活動時間計算，後者不是進入 TIMEOUT 後再等待的時間。0 分別代表停用；非零 disconnect 必須大於非零 timeout。沒有資料的新 registration 不會被自動選為輸出來源。
 - Wireless interruption 與 R2／Twist sentinel 急停不同：前者全域鎖存、必須手動 reset；後者維持原先非鎖存行為。Reset 清掉復歸前候選與 converter，不移除 Manager 註冊，也不主動重播。
 
+普通運動指令維持 **event-triggered**：只有新 Joy／Twist 進入 callback，且速度值改變或 Joy 按鍵出現 PRESS，才會發布；持續同值資料只保活，不按固定頻率重發 Move。Watchdog 定時檢查存活，只在失聯／換手時停止前任一次；R1 status／heartbeat 的定時流量不是機器人運動輸出。R2／Twist sentinel 仍每收到一封急停就執行 StopMove，wireless 則只在進入鎖存狀態時停止。
+
+輸出狀態由本包 `sendCommand()` 記錄：command 使用原版 SportClient，成功發布後回傳同一份 Request，上層保存其實際 payload。`SportClientCmd` 的 C++ 回傳型別因此改為 `unitree_api::msg::Request`；自訂 command 需回傳已發布的 Request，現有 command 都只發布一次。這次 PR 不修改 `thirdparty`，SDK 不承擔 server 狀態紀錄。
+
 預設 server parameters 位於 `config/control_server.yaml`：watchdog 50ms、manager status 100ms、CSM timeout 600ms、CSM disconnect 6000ms。Manager status 必須小於 CSM timeout 的一半；參數無效會在啟動時拒絕。
 
 ## 建置依賴
@@ -78,13 +82,13 @@ python3 src/rv2_server_control/scripts/build_with_unitree.py -- --symlink-instal
 
 | 路徑 | 來源／驗證基線 |
 |---|---|
-| `../r1_interfaces` | v0.1.3 候選 `34e5d1e`，新增 ControlServerStatus／三 services；此 server PR 相依於該介面 PR，舊 v0.1.2 不包含新介面 |
+| `../r1_interfaces` | v0.1.3 已合併主線 `dc3e199`，與原 tag `34e5d1e` tree 相同；舊 v0.1.2 不包含新介面 |
 | `../rv2_control_signal_transport` | R1 v0.2.0，已合併主線 `5a91d31` |
 | `../rv2_csm_topic_bridge` | R1 v0.1.0，已合併主線 `78ba1a9` |
 | `../joy_interpreter` | `test` 分支 `944306b61746dcdaa932a404994b8f829a2a9611` |
 | `thirdparty/unitree/unitree_api`、`thirdparty/unitree/unitree_go` | 內附官方 `unitree_ros2` commit `5204e6e098ee53f4bd929bd77eb1d387cd0fa842` 的 API／Go sources |
 
-不再需要外部 `../unitree_api` checkout 或 symlink。三份內附 Unitree manifest 都已補上其 CMake 所需的 `rosidl_generator_dds_idl` build dependency；來源、BSD 授權與本地修改見 [thirdparty/unitree/README.md](thirdparty/unitree/README.md)。JSON CMake package 是 `nlohmann_json`，對應 rosdep key 為 `nlohmann-json-dev`。
+不再需要外部 `../unitree_api` checkout 或 symlink。三份內附 Unitree manifest 都已補上其 CMake 所需的 `rosidl_generator_dds_idl` build dependency；來源、BSD 授權與本地修改見 [thirdparty/unitree/README.md](thirdparty/unitree/README.md)。`thirdparty` 內 README 保留匯入基線的說明，現行 server 所需 api/go 及建置選擇以本文件為準。JSON CMake package 是 `nlohmann_json`，對應 rosdep key 為 `nlohmann-json-dev`。
 
 ## 測試
 
@@ -106,6 +110,6 @@ git submodule update --init --recursive
 - `test/integration/test_control_server.cpp`：R1 topic/service Joy/Twist、priority 100、request-active 優先權、超時 fallback 與單次急停、單封訊號、重新註冊、disabled timeout、manual selection、TypeConfig 更新、callback 執行中安全結束、跨型別唯一 owner、嚴格 switch、wireless latch／reset 與併發。
 - `test/integration/test_joy_bridge.py`：真正 master／bridge／server processes，best-effort Joy→Unitree x/y/yaw 與按鍵、保持值去重、input silence 無重播、同值恢復、bridge crash/restart、server crash/restart 與 master 對帳。readiness 根據實際輸出與 R1 incarnation 判定。
 
-新增 `test/integration/test_control_services.py` 驗證 production node 三服務、實際 wireless／Unitree topics、last-output metadata、手動切換與 interruption 復歸。Wireless 行為參考 develop `750938f7`，使用新的 R1 介面；不引入 legacy `ControlServerReq` 或 requester priority YAML。Package 版本、tag、PR 依 project `r1_todo.md` §1 在功能與驗證完成後獨立處理。
+新增 `test/integration/test_control_services.py` 驗證 production node 三服務、實際 wireless／Unitree topics、last-output metadata、手動切換與 interruption 復歸；另外跨多個 timer ticks 驗證 Joy／Twist 同值保活不重送、值改變單次輸出、輸入停止單次 StopMove 及同值新輸入恢復。Wireless 行為參考 develop `750938f7`，使用新的 R1 介面；不引入 legacy `ControlServerReq` 或 requester priority YAML。Package 版本、tag、PR 依 project `r1_todo.md` §1 在功能與驗證完成後獨立處理。
 
 目前 framework v0.5.1 的 `test_packages.sh` 對內部 source path 與 sibling bind mount 有嚴格路徑比對限制；本次驗證涵蓋四步測試、lint 與 source build，未提供 Debian 打包支援。
