@@ -363,6 +363,11 @@ ros2 run rv2_server_control control_server --ros-args \
 | Joy 按鍵／axes 轉換 | [joy_sport_client_map.h](../include/rv2_server_control/joy_sport_client_map.h) |
 | 跨型別全域仲裁、priority 100、strict switch、interrupt/reset 與 callback fence | [integration tests](../test/integration/test_control_server.cpp) |
 | 編碼邊界、短 Joy arrays、轉換與 reset | [unit tests](../test/unit/test_control_server.cpp) |
+| GUI 三服務請求、新鮮度、timeout、操作防重送 | [client.py](../rv2_server_control_gui/client.py) |
+| GUI 註冊表、最後輸出、失聯顯示與手動操作 | [window.py](../rv2_server_control_gui/window.py) |
+| GUI Qt／ROS event loop 與退出清理 | [main.py](../rv2_server_control_gui/main.py) |
+| GUI-only／server/master 組合與 shutdown | [GUI launch](../launch/control_server_gui.launch.py) |
+| GUI 搭配真實 services／bridge 的互動 | [GUI integration test](../test/integration/test_control_server_gui.py) |
 
 依賴基線與介面來源：
 
