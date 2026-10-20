@@ -47,14 +47,6 @@ public:
             RCLCPP_WARN(get_logger(), "[INTERRUPTED] wireless input; StopMove sent, manual reset required");
         };
         server_ = std::make_unique<Server>(this, config);
-        // All command callbacks and this observer execute under the Core mutex.
-        // Record only after our publisher succeeds, never from the shared topic.
-        sportClient_.setRequestObserver(
-            [this](const unitree_api::msg::Request& request)
-            {
-                server_->recordOutput(
-                    now(), outputController_, request.header.identity.api_id, request.parameter, request.binary);
-            });
         registerType<sensor_msgs::msg::Joy>("joy");
         registerType<geometry_msgs::msg::Twist>("twist");
         const auto wirelessTopic = declare_parameter<std::string>("wireless_topic", "/wirelesscontroller");
@@ -150,8 +142,10 @@ private:
 
     void sendCommand(const rv2_interfaces::rv2_server_control::SportClientCmd& command, const std::string& controller)
     {
-        outputController_ = controller;
-        command(sportClient_);
+        // Core serializes command execution and this post-publish snapshot.
+        // Each command returns the same request filled and published by the SDK.
+        const auto request = command(sportClient_);
+        server_->recordOutput(now(), controller, request.header.identity.api_id, request.parameter, request.binary);
     }
 
     template <typename MsgT> void registerType(const std::string& type)
@@ -190,7 +184,6 @@ private:
 
     SportClient sportClient_;
     rv2_interfaces::rv2_server_control::OutputMessageConverter converter_;
-    std::string outputController_;
     bool logOutput_ = true;
     rclcpp::Subscription<unitree_go::msg::WirelessController>::SharedPtr wireless_;
     rclcpp::Service<StatusService>::SharedPtr statusService_;

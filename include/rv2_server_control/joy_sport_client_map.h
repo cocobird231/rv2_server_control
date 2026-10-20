@@ -74,7 +74,8 @@ namespace rv2_interfaces::rv2_server_control
 
 // ── Alias (also declared here so joy_sport_client_map.h is self-contained) ───
 
-using SportClientCmd = std::function<void(SportClient&)>;
+// Each command publishes once and returns the exact request on successful return.
+using SportClientCmd = std::function<unitree_api::msg::Request(SportClient&)>;
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Axis / button index constants
@@ -141,6 +142,7 @@ struct JoyChannelState
  *
  * Fully event-triggered: returns a command only when a button PRESS fired or
  * the Move values (vx, vy, vyaw) changed since the last emitted Move.
+ * Invoking a non-empty command returns the request after its local publish.
  * Otherwise returns an EMPTY SportClientCmd — callers MUST check it
  * (`if (cmd) cmd(sc);`) before invoking.
  */
@@ -163,24 +165,28 @@ inline SportClientCmd joyToSportClientCmd(JoyChannelState& st, const sensor_msgs
             {
                 unitree_api::msg::Request req;
                 sc.StandUp(req);
+                return req;
             };
         case JOY_BTN_B:
             return [](SportClient& sc)
             {
                 unitree_api::msg::Request req;
                 sc.StandDown(req);
+                return req;
             };
         case JOY_BTN_X:
             return [](SportClient& sc)
             {
                 unitree_api::msg::Request req;
                 sc.StopMove(req);
+                return req;
             };
         case JOY_BTN_Y:
             return [](SportClient& sc)
             {
                 unitree_api::msg::Request req;
                 sc.RecoveryStand(req);
+                return req;
             };
         default:
             break;
@@ -202,6 +208,7 @@ inline SportClientCmd joyToSportClientCmd(JoyChannelState& st, const sensor_msgs
     {
         unitree_api::msg::Request req;
         sc.Move(req, vx, vy, vyaw);
+        return req;
     };
 }
 

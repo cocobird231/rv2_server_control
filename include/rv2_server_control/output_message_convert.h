@@ -21,6 +21,7 @@ inline SportClientCmd makeStopSignal()
     {
         unitree_api::msg::Request request;
         client.StopMove(request);
+        return request;
     };
 }
 
@@ -48,6 +49,7 @@ public:
         {
             unitree_api::msg::Request request;
             client.Move(request, vx, vy, yaw);
+            return request;
         };
     }
 
