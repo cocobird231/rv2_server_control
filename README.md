@@ -151,6 +151,9 @@ git submodule update --init --recursive
 - `test/unit/test_control_server.cpp`：Joy 短陣列、Twist sentinel、converter per-channel／per-instance 去重、reset 同值恢復、button press edge。
 - `test/integration/test_control_server.cpp`：R1 topic/service Joy/Twist、priority 100、request-active 優先權、超時 fallback 與單次急停、單封訊號、重新註冊、disabled timeout、manual selection、TypeConfig 更新、callback 執行中安全結束、跨型別唯一 owner、嚴格 switch、wireless latch／reset 與併發。
 - `test/integration/test_joy_bridge.py`：真正 master／bridge／server processes，best-effort Joy→Unitree x/y/yaw 與按鍵、保持值去重、input silence 無重播、同值恢復、bridge crash/restart、server crash/restart 與 master 對帳。readiness 根據實際輸出與 R1 incarnation 判定。
+- `test/unit/test_control_server_gui_client.py`／`test_control_server_gui_window.py`：非阻塞請求、逾時與晚回覆隔離、namespace、操作限制、Qt 選列與按鈕、輸出顯示及小視窗版面。
+- `test/integration/test_control_server_gui.py`：Qt 主執行緒搭配真實雙 bridge／server，驗證低優先權切換、NOT_ACTIVE 拒絕、wireless／reset、輸出不重播與 server 重啟後恢復。
+- `test/integration/test_control_server_gui_launch.py`：載入已安裝 launch，驗證 namespace、GUI-only 關閉保留 server，以及 combo GUI 關閉後清理整個 launch session。
 
 新增 `test/integration/test_control_services.py` 驗證 production node 三服務、實際 wireless／Unitree topics、last-output metadata、手動切換與 interruption 復歸；另外跨多個 timer ticks 驗證 Joy／Twist 同值保活不重送、值改變單次輸出、輸入停止單次 StopMove 及同值新輸入恢復。Wireless 行為參考 develop `750938f7`，使用新的 R1 介面；不引入 legacy `ControlServerReq` 或 requester priority YAML。Package 版本、tag、PR 依 project `r1_todo.md` §1 在功能與驗證完成後獨立處理。
 

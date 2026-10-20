@@ -19,8 +19,9 @@ from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace
 from launch_testing import post_shutdown_test
-from launch_testing.actions import KeepAliveProc, ReadyToTest
+from launch_testing.actions import ReadyToTest
 from launch_testing.asserts import assertExitCodes
+from launch_testing.util import KeepAliveProc
 from r1_interfaces.srv import ControlServerStatusReq
 from rclpy import create_node, init, shutdown
 from rclpy.executors import SingleThreadedExecutor
