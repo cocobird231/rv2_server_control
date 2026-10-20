@@ -1,6 +1,6 @@
 # Control Server 現行架構、服務與控制權仲裁
 
-查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 使用 `r1_interfaces` v0.1.3 候選 `34e5d1e`，尚未合併；server 的 CMake 與 manifest 明確要求 interfaces ≥0.1.3，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表 server 新版本已發布或已完成實機驗收。
+查核日期：2026-10-20。本文描述從已合併 `r1` commit `9d6143b` 開發的 control-server services／wireless interrupt 功能；transport 基線仍為 v0.2.0／`5a91d31`。新增的 `ControlServerStatus` 與三個 services 已隨 `r1_interfaces` v0.1.3 的 [PR #3](https://github.com/cocobird231/r1_interfaces/pull/3) 合併，主線 SHA 為 `dc3e199`，與原 release commit `34e5d1e` 的 tree 相同。Server 的 CMake 與 manifest 明確要求 interfaces ≥0.1.3，不能用既有 v0.1.2／`a0530d7` 代替。本文件不代表 server 新版本已發布或已完成實機驗收。
 
 ## 1. 目前行為摘要
 
@@ -22,13 +22,14 @@ flowchart LR
     B -->|"註冊描述 + 控制資料"| M["ControlSignalManager / 動態 Sink"]
     M --> A["ControlServer Core：Joy/Twist 全域單一 owner"]
     A --> C["OutputMessageConverter"]
-    C --> S["SportClient"]
+    C --> D["Node sendCommand / SportClientCmd"]
+    D --> S["原始 SportClient 方法"]
     S --> R["/api/sport/request"]
     I["/wirelesscontroller：每封訊息"] --> L["interrupt latch"]
     L -->|"抑制控制輸出"| A
-    L -->|"未鎖定→鎖定：一次 StopMove"| S
+    L -->|"未鎖定→鎖定：一次 StopMove"| D
     Q["switch_controller / reset_interrupt"] --> A
-    S -. "本地 publish observer" .-> T["最後實際輸出狀態"]
+    D -. "命令完成後以返回的 Request 紀錄" .-> T["最後實際輸出狀態"]
     A -. "owner / interrupted / registered" .-> T
     T --> U["control_server_status service"]
     W["watchdog：預設 50 ms"] --> A
@@ -40,11 +41,11 @@ flowchart LR
 
 | 組件 | 目前責任 | 主要實作 |
 |---|---|---|
-| `ControlServerNode` | 讀取參數、建立三個操作服務與 wireless subscription，連接 Joy／Twist、Unitree 輸出及狀態紀錄 | [control_server.cpp](../src/control_server.cpp) |
+| `ControlServerNode` | 建立操作服務與 wireless subscription；`sendCommand()` 執行命令後，以返回的已發布 request 與來源 controller 紀錄輸出 | [control_server.cpp](../src/control_server.cpp) |
 | R1 `ControlSignalManager` | 管理來源註冊、建立 Sink、接收資料、追蹤存活狀態、與 master 對帳 | transport 的 `r1/control_signal_manager.h` |
 | `ControlServer` | 記錄各 channel 收訊、跨型別選單一 active、處理急停／失聯、wireless latch 與手動操作 | [control_server.h](../include/rv2_server_control/control_server.h) |
-| `OutputMessageConverter` | 將 active 的普通訊息轉為動作，保存 Joy 按鍵與速度去重狀態 | [output_message_convert.h](../include/rv2_server_control/output_message_convert.h) |
-| `SportClient` | 發布 `unitree_api/msg/Request`，本地 observer 在 publish 成功返回後紀錄該 request | [sport client](../thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp) |
+| `OutputMessageConverter` | 保存 Joy 按鍵與速度去重狀態，將需要輸出的普通訊息轉成 `SportClientCmd` | [output_message_convert.h](../include/rv2_server_control/output_message_convert.h) |
+| `SportClient` | 由既有 vendor 方法填入並發布 `unitree_api/msg/Request`；thirdparty 內容維持 `9d6143b` 基線 | [sport client](../thirdparty/unitree_ros2_client/ros2_b2_sport_client.cpp) |
 | CSM Master | 偵測 Manager 存活與兩端註冊不一致，通知相關 Manager；不選擇機器人的 active controller | transport 的 `r1/csm_master.h` |
 
 Transport 傳遞 priority，但不替 consumer 仲裁；選擇政策在 `ControlServer`。Core mutex 序列化收訊仲裁、watchdog、interrupt／reset／switch 與 output callbacks，callback 應保持簡短且不阻塞。訊息型別仍各自保存 records 與轉換 callback，控制權則只有一個。
@@ -245,7 +246,11 @@ Reset 本身不發 Move 或 StopMove，不清除最後實際輸出的 metadata�
 
 Master 依最後收到本 Manager heartbeat 的時間判斷存活；上述兩個 CSM 門檻不表示 server 等待 master 回覆的時間。Server 預設值見 [control_server.yaml](../config/control_server.yaml)。實際停止時間還受 executor 排程、callback 與 watchdog 檢查時間影響，50 ms 不是端到端停止保證。
 
-Active Joy 的 axes 0／1／3 轉成 Move x／y／yaw；A／B／X／Y 按下事件分別轉成 StandUp／StandDown／StopMove／RecoveryStand。Active Twist 使用 linear.x／linear.y／angular.z。相同 Move 值不重複發布，初始全零通常不發 Move。換手、仲裁 stop callback（急停／失聯）或端點重建會重設轉換狀態，重新收到相同非零值仍能恢復輸出；X 的普通 StopMove 不走這個 reset。
+普通 Move 是事件驅動：必須收到全域 active 的新普通資料 callback，且轉換後的速度值相較該 channel 保存的值有變化，才會發布。Active Joy 的 axes 0／1／3 轉成 Move x／y／yaw；active Twist 使用 linear.x／linear.y／angular.z。沒有 Move 重發 timer；持續收到相同速度也不反覆發布 Move，停止收訊時更不會重播最後命令，初始全零通常不發 Move。
+
+Joy 的 A／B／X／Y 由 `JoyInterpreter` 的 PRESS 邊緣事件分別產生 StandUp／StandDown／StopMove／RecoveryStand。按鍵保持按下不會反覆觸發同一個按鍵動作。R2／Twist sentinel 是例外的安全路徑：未被 wireless 鎖定時，每一封符合條件的急停訊息都發 StopMove，不做按下邊緣去重。Wireless 則只在 latch 的未鎖定→鎖定邊緣發一次 StopMove。
+
+Watchdog 雖然週期執行，只在資料失效／換手需要停止舊輸出時發一次安全 StopMove，不週期發 Move。R1 heartbeat、Manager tick 與 status 發布也屬週期工作，但不會重發機器人運動命令。Reset 不發輸出；switch 可先停止舊 owner，但不重播新 owner 的快取資料。換手、仲裁 stop、wireless interrupt／reset 或端點重建會重設 converter；之後仍要等新的普通資料 callback，才按新的去重狀態判斷是否輸出，因此相同非零值可恢復。X 的普通 StopMove 不走此 reset。
 
 輸出是 `/api/sport/request` 的 `unitree_api/msg/Request` **topic**，不是 ROS service。現行路徑發布命令，不等待機器人完成確認。它是絕對 topic 名稱，替 server 換 namespace 不會自動將 robot 輸出隔離成不同 topic。
 
@@ -264,7 +269,9 @@ Active Joy 的 axes 0／1／3 轉成 Move x／y／yaw；A／B／X／Y 按下事�
 
 Server 狀態與最後輸出 metadata 在同一 Core lock 下複製；Manager 註冊清單使用自己的 lock，註冊可在兩部分取樣間改變。`stamp`／`output_stamp` 使用 ROS clock，與 watchdog 的本地 steady clock 分開；ROS 時間為零時仍可用 `has_output` 判斷是否真的有過輸出。
 
-`SportClient` 的本地擴充 `publishRequest()` 先呼叫 publisher，再同步呼叫 `setRequestObserver()` 設定的 observer；Node 由此紀錄該次真正 request。沒有訂閱共用輸出 topic 來推測來源，所以外部程序的 request 不會覆寫這份狀態。被去重或遭抑制而未發布 request 的輸入不更新 output metadata。request-active 本身不轉成 Move，但成功換手所發布的 StopMove 仍更新紀錄。最後輸出可能是舊 controller 的 StopMove，而 active 已換成另一個 controller；這是刻意區分的兩項資訊，均不表示 robot ACK。
+輸出紀錄由 server 自有程式完成，thirdparty 維持基線內容。`SportClientCmd` 的型別為 `std::function<unitree_api::msg::Request(SportClient&)>`：命令建立 request，呼叫原始 vendor 方法填入並發布，方法正常返回後再將同一份 request 回傳給 Node。`sendCommand()` 在 Core lock 的序列化範圍內執行命令，再以回傳的 request、呼叫參數中的 controller 及當下 ROS clock 呼叫 `recordOutput()`。每次命令的 request 只由 vendor 方法發布一次。
+
+Server 不訂閱共用輸出 topic 來推測來源，所以外部程序的 request 不會覆寫這份狀態。被去重或遭抑制而未發布 request 的輸入不更新 output metadata。request-active 本身不轉成 Move，但成功換手所發布的 StopMove 仍更新紀錄。最後輸出可能是舊 controller 的 StopMove，而 active 已換成另一個 controller；這是刻意區分的兩項資訊，均不表示 robot ACK。
 
 以下為讀取／觀察命令，名稱依實際 namespace 調整：
 
@@ -327,7 +334,7 @@ ros2 run rv2_server_control control_server --ros-args \
 
 依賴基線與介面來源：
 
-- Interfaces v0.1.3 候選 `34e5d1ec3aa142f481d6cc09875dc1c4f1101780` 的 [msg](https://github.com/cocobird231/r1_interfaces/tree/34e5d1ec3aa142f481d6cc09875dc1c4f1101780/msg) 與 [srv](https://github.com/cocobird231/r1_interfaces/tree/34e5d1ec3aa142f481d6cc09875dc1c4f1101780/srv)，包含新增的 `ControlServerStatus.msg`、`ControlServerStatusReq.srv`、`SwitchControllerReq.srv`、`ResetInterruptReq.srv`。這是尚未合併的精確開發依賴，不是已合併 project snapshot。
+- Interfaces v0.1.3 已合併主線 `dc3e199549a1a78315485bbc82d72b8aef856c80` 的 [msg](https://github.com/cocobird231/r1_interfaces/tree/dc3e199549a1a78315485bbc82d72b8aef856c80/msg) 與 [srv](https://github.com/cocobird231/r1_interfaces/tree/dc3e199549a1a78315485bbc82d72b8aef856c80/srv)，包含新增的 `ControlServerStatus.msg`、`ControlServerStatusReq.srv`、`SwitchControllerReq.srv`、`ResetInterruptReq.srv`。此 SHA 與原 v0.1.3 release commit `34e5d1ec3aa142f481d6cc09875dc1c4f1101780` 的 tree 相同；interfaces 合併不會自動更新 project snapshot 或既有 checkout。
 - [ControlSignalManager](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_manager.h)、[ControlSignalSink](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/control_signal_sink.h)、[CSM Master](https://github.com/cocobird231/rv2_control_signal_transport/blob/5a91d316146e2f3cb52e77002faec139735ba61c/include/rv2_control_signal_transport/r1/csm_master.h)。
 - [R1 bridge 預設設定](https://github.com/cocobird231/rv2_csm_topic_bridge/blob/78ba1a94825eb9790f23a3be5dbfb31df5162ec7/config/topic_bridge.yaml)。
 - Jazzy 標準服務：[parameter services](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/parameter_service.cpp)、[type-description service](https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/src/rclcpp/node_interfaces/node_type_descriptions.cpp)。
