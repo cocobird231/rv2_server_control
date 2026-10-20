@@ -89,3 +89,38 @@ TEST(OutputConversion, ButtonsTriggerOncePerPress)
         EXPECT_FALSE(converter.convert("joy", message));
     }
 }
+
+TEST(OutputConversion, AdvancingJoyTimeDoesNotRepeatCommands)
+{
+    server::OutputMessageConverter converter;
+    Joy message;
+    message.axes = {0.25f};
+    message.buttons.assign(12, 0);
+    message.header.stamp.sec = 1;
+    ASSERT_TRUE(converter.convert("joy", message));
+
+    // A new timestamp with held axes is input activity, not a new Move.
+    message.header.stamp.sec = 30;
+    EXPECT_FALSE(converter.convert("joy", message));
+    message.buttons[0] = 1;
+    message.header.stamp.sec = 31;
+    ASSERT_TRUE(converter.convert("joy", message));
+    // Crossing the interpreter's long-press threshold must not repeat StandUp.
+    message.header.stamp.sec = 60;
+    EXPECT_FALSE(converter.convert("joy", message));
+    message.header.stamp.sec = 90;
+    EXPECT_FALSE(converter.convert("joy", message));
+    message.buttons[0] = 0;
+    message.header.stamp.sec = 91;
+    EXPECT_FALSE(converter.convert("joy", message));
+
+    message.buttons[1] = 1;
+    message.header.stamp.sec = 92;
+    ASSERT_TRUE(converter.convert("joy", message));
+    message.buttons[1] = 0;
+    message.header.stamp.nanosec = 10'000'000;
+    EXPECT_FALSE(converter.convert("joy", message));
+    // Expiring the single-click window also adds no robot command.
+    message.header.stamp.sec = 120;
+    EXPECT_FALSE(converter.convert("joy", message));
+}

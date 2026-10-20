@@ -276,6 +276,30 @@ class TestControlServices(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.count(), count)
 
+    def assert_held_input(self, name, message_factory, count):
+        """Keep input alive across real status ticks without producing more output."""
+        before = self.status()
+        with self.lock:
+            sequence = self.manager_status.snapshot_seq
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            self.send(name, message_factory())
+            self.assert_quiet(count, 0.025)
+
+        def ticks_advanced():
+            with self.lock:
+                return self.manager_status.snapshot_seq >= sequence + 3
+
+        self.assertTrue(self.wait_for(ticks_advanced), "Manager status stopped ticking")
+        self.assertTrue(
+            self.sink_active(name), "held input did not keep its sink alive"
+        )
+        after = self.status()
+        self.assertEqual(after.active_controller_name, name)
+        self.assertGreater(stamp_ns(after.stamp), stamp_ns(before.stamp))
+        self.assertEqual(self.output_metadata(after), self.output_metadata(before))
+        self.assertEqual(self.count(), count)
+
     @staticmethod
     def output_metadata(status):
         """Exclude query time so suppressed input must preserve all output fields."""
@@ -455,6 +479,59 @@ class TestControlServices(unittest.TestCase):
         self.interrupt()  # An identical neutral wireless packet must re-latch.
         self.assert_output(8, STOP, "")
         self.assert_quiet(8)
+
+        # Continue the same lifecycle so this phase has explicit reset state,
+        # rather than relying on unittest's ordering with shared class fixtures.
+        self.reset()
+        self.assert_quiet(8, 0.3)
+        self.assertEqual(self.status().active_controller_name, "")
+        self.send(JOY, self.joy(0.61))
+        self.assert_output(9, MOVE, JOY)
+        self.assert_held_input(JOY, lambda: self.joy(0.61), 9)
+        self.send(JOY, self.joy(0.62))
+        changed_joy = self.assert_output(10, MOVE, JOY)
+        self.assertAlmostEqual(
+            json.loads(changed_joy.output_parameter)["x"], 0.62, places=5
+        )
+        self.assert_held_input(JOY, lambda: self.joy(0.62), 10)
+
+        # A lower-priority Twist first remains pending, then takes over only
+        # through the explicit switch. Repeated acknowledged samples test live
+        # input deduplication, not the absence of any input callbacks.
+        held_twist = Twist()
+        held_twist.linear.x, held_twist.angular.z = 0.21, 0.1
+        self.send(TWIST, held_twist)
+        self.assertTrue(self.wait_for(lambda: self.sink_active(TWIST)))
+        self.assertEqual(self.count(), 10)
+        self.switch(TWIST, result.RESPONSE_SUCCESS)
+        self.assert_output(11, STOP, JOY)
+        self.assert_quiet(11)
+        self.send(TWIST, held_twist)
+        self.assert_output(12, MOVE, TWIST)
+        self.assert_held_input(TWIST, lambda: held_twist, 12)
+        held_twist.linear.x = 0.22
+        self.send(TWIST, held_twist)
+        changed_twist = self.assert_output(13, MOVE, TWIST)
+        self.assertAlmostEqual(
+            json.loads(changed_twist.output_parameter)["x"], 0.22, places=5
+        )
+        self.assert_held_input(TWIST, lambda: held_twist, 13)
+
+        # Stop all data calls while source snapshots and server timers continue.
+        # The active data deadline produces one safety stop, then stays quiet.
+        self.assertTrue(
+            self.wait_for(lambda: self.count() >= 14, DATA_TIMEOUT + 2.0),
+            "silent input did not trigger the safety stop",
+        )
+        timed_out = self.assert_output(14, STOP, TWIST)
+        self.assertEqual(timed_out.active_controller_name, "")
+        self.assert_quiet(14, 0.3)
+        self.assertEqual(
+            self.output_metadata(self.status()), self.output_metadata(timed_out)
+        )
+        self.send(TWIST, held_twist)
+        self.assert_output(15, MOVE, TWIST)
+        self.assert_held_input(TWIST, lambda: held_twist, 15)
 
 
 @post_shutdown_test()
