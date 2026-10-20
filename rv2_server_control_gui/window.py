@@ -71,13 +71,15 @@ class ControlServerWindow(QWidget):
         font.setPointSize(19)
         font.setBold(True)
         title.setFont(font)
+        self.connection_badge = plain_label()
         self.connection_label = plain_label()
         header = QHBoxLayout()
         header.addWidget(title, 1)
-        header.addWidget(self.connection_label, 1, Qt.AlignRight)
+        header.addWidget(self.connection_badge, 1, Qt.AlignRight)
         layout.addLayout(header)
         self.target_label = plain_label(f"Service target: {client.target_prefix}")
         layout.addWidget(self.target_label)
+        layout.addWidget(self.connection_label)
 
         self.interrupt_label = plain_label()
         self.interrupt_label.setContentsMargins(12, 9, 12, 9)
@@ -235,7 +237,9 @@ class ControlServerWindow(QWidget):
         self.connection_label.setText(
             "Connected" if state.connected else state.connection_message
         )
-        self.connection_label.setStyleSheet(
+        self.connection_label.setVisible(not state.connected)
+        self.connection_badge.setText("Connected" if state.connected else "Unavailable")
+        self.connection_badge.setStyleSheet(
             "color: #17613a;" if state.connected else "color: #6b3b14;"
         )
         interrupted = bool(status and status.interrupted)
